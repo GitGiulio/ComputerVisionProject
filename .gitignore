@@ -1,3 +1,10 @@
 /Data
 /CIFAKE-Real-and-AI-Generated-Synthetic-Images
-/gradcam_outputs
+/output_txt_files
+/interpretability
+/models
+/Mathijs/cifar_net.pth
+/Frederik/data
+/Frederik/best_*
+/.vscode
+/__pycache__
