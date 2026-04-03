@@ -21,14 +21,14 @@ from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE
 torch.backends.cudnn.benchmark = True
 
 # Grad-CAM / output config
-OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/gradcam_outputs_new_kernel=11"
+OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/gradcam_outputs_new_2_kernel=[5,9,17]"
 NUM_CAM_SAMPLES = 10
 IMAGE_SIZE = 256
-DEVICE = f"cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = f"cuda:1" if torch.cuda.is_available() else "cpu"
 
 DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
 
-MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=11_32_2_64_1.pth"
+MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
 
 BATCH_SIZE = 64
 IMAGE_SIZE = 256
@@ -37,7 +37,7 @@ EXPLAIN_PROBABILITY = True
 
 USE_FILENAME_HPARAMS = False
 MANUAL_CONV_FILTER = 32
-MANUAL_CONV_LAYER = 2
+MANUAL_CONV_LAYER = 3
 MANUAL_DENSE_NEURON = 64
 MANUAL_DENSE_LAYER = 1
 
@@ -124,7 +124,7 @@ def generate_gradcam_samples(model,test_loader,idx_to_class,n_samples):
 
     saved = 0
     base_out = OUT_DIR
-    skip = int(len(test_loader)//2) + 1
+    skip = 0 #int(len(test_loader)//2) + 1
     try:
         for batch_idx, batch in enumerate(test_loader):
             if skip > 0:
@@ -225,6 +225,7 @@ if __name__ == "__main__":
     print(f"  dense_layer = {dense_layer}")
 
     model = I_HAVE_A_THEORY(
+        kernel_size=17,
         conv_filters=conv_filter,
         conv_layers=conv_layer,
         dense_neurons=dense_neuron,

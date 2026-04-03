@@ -11,24 +11,24 @@ from torchvision.io import read_image
 import shap
 from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN, I_HAVE_A_THEORY, parse_hparams_from_model_path, evaluate
 
-DEVICE = f"cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = f"cuda:1" if torch.cuda.is_available() else "cpu"
 
 DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
 
-MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=11_32_2_64_1.pth"
+MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
 
 BATCH_SIZE = 64
 IMAGE_SIZE = 256
 
 NUM_BACKGROUND = 50
 NUM_EXPLAIN = 10
-OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs"
+OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs/kernel=[5,9,17]"
 
 EXPLAIN_PROBABILITY = True
 
 USE_FILENAME_HPARAMS = False
 MANUAL_CONV_FILTER = 32
-MANUAL_CONV_LAYER = 2
+MANUAL_CONV_LAYER = 3
 MANUAL_DENSE_NEURON = 64
 MANUAL_DENSE_LAYER = 1
 
@@ -63,7 +63,7 @@ def collect_n_samples(loader, n_samples):
     """
     xs, ys, paths_all = [], [], []
     total = 0
-    skip = int(len(loader)//2) + 1 #int(len(loader)//2) + 1
+    skip = 0 #int(len(loader)//2) + 1
 
     print(skip)
     for batch in loader:
@@ -202,6 +202,7 @@ if __name__ == "__main__":
     print(f"  dense_layer = {dense_layer}")
 
     model = I_HAVE_A_THEORY( # CIFAKE_CNN | I_HAVE_A_THEORY
+        kernel_size=17,
         conv_filters=conv_filter,
         conv_layers=conv_layer,
         dense_neurons=dense_neuron,

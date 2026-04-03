@@ -166,8 +166,14 @@ class I_HAVE_A_THEORY(nn.Module):
         conv_blocks = []
         in_channels = 3
 
-        for _ in range(conv_layers):
-            conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=kernel_size, stride=1, padding=(kernel_size-1)//2))
+        for i in range(conv_layers):
+            if i==0:
+                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=5, stride=1, padding=(5-1)//2))
+            elif i==1:
+                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=9, stride=1, padding=(9-1)//2))
+            else:
+                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=kernel_size, stride=1, padding=(kernel_size-1)//2))
+
             conv_blocks.append(nn.ReLU())
             conv_blocks.append(nn.MaxPool2d(kernel_size=2, stride=2))
             in_channels = conv_filters

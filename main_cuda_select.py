@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import precision_score, recall_score, f1_score
 import numpy as np
-#from tqdm import tqdm
+from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN,I_HAVE_A_THEORY, parse_hparams_from_model_path, GradCAM
 
@@ -14,8 +14,9 @@ device_number=1
 
 DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
 BATCH_SIZE = 256
-LR = 1e-3
-EPOCHS = 20
+#LR = 1e-3 old one
+LR = 1e-5
+EPOCHS = 9
 
 torch.backends.cudnn.benchmark = True
 
@@ -36,8 +37,8 @@ def train_one_epoch(epoch,train_loader):
     running_loss = 0.0
     steps = 0
 
-    #loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
-    for i,batch in enumerate(train_loader):
+    loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
+    for batch in loop:
         #print(f"done batch {i}")
         if batch is None:
             continue
@@ -99,9 +100,9 @@ def evaluate(model,test_loader):
 
 
 if __name__ == "__main__":
-    KERNEL_SIZES = [3,11,21]
+    KERNEL_SIZES = [3,11,17]
     CONV_FILTERS = [32,64]          # {16, 32, 64, 128}
-    CONV_LAYERS = [2, 3]            # {1, 2, 3}
+    CONV_LAYERS = [3, 3]            # {1, 2, 3}
     DENSE_NEURONS = [64,4096]         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
     DENSE_LAYERS = [1,3]           # {1, 2, 3}
     
@@ -125,6 +126,9 @@ if __name__ == "__main__":
                     print(f"STARTING TRAINING with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
                     #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
                     model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+                    MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
+                    state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+                    model.load_state_dict(state_dict)
                     print(model)
                     # Use logits-safe, autocast-safe BCEWithLogitsLoss
                     criterion = nn.BCEWithLogitsLoss()
@@ -132,7 +136,7 @@ if __name__ == "__main__":
                     scaler = GradScaler(enabled=(DEVICE == f"cuda:{device_number}"))
                     for epoch in range(EPOCHS):
                         train_one_epoch(epoch,train_loader)
-                        torch.save(obj=model.state_dict(),f=f"/home/cv04f26/ComputerVisionProject/models/model_kernel={KERNEL_SIZE}_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
+                        torch.save(obj=model.state_dict(),f=f"/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
                     accuracy, precision, recall, f1 = evaluate(model,train_loader)
                 except Exception as e:
                     print(f"FAILED with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
