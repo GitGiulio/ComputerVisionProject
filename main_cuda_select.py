@@ -16,7 +16,7 @@ DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
 BATCH_SIZE = 256
 #LR = 1e-3 old one
 LR = 1e-5
-EPOCHS = 9
+EPOCHS = 5
 
 torch.backends.cudnn.benchmark = True
 

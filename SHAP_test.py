@@ -22,7 +22,7 @@ IMAGE_SIZE = 256
 
 NUM_BACKGROUND = 50
 NUM_EXPLAIN = 10
-OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs/kernel=[5,9,17]"
+OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs/kernel2=[5,9,17]"
 
 EXPLAIN_PROBABILITY = True
 
@@ -63,7 +63,7 @@ def collect_n_samples(loader, n_samples):
     """
     xs, ys, paths_all = [], [], []
     total = 0
-    skip = 0 #int(len(loader)//2) + 1
+    skip = int(len(loader)//2) + 3 #int(len(loader)//2) + 1
 
     print(skip)
     for batch in loader:
