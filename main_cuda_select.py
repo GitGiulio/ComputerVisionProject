@@ -100,7 +100,7 @@ def evaluate(model,test_loader):
 
 
 if __name__ == "__main__":
-    KERNEL_SIZES = [3,11,17]
+    KERNEL_SIZES = [5,9,23]
     CONV_FILTERS = [32,64]          # {16, 32, 64, 128}
     CONV_LAYERS = [3, 3]            # {1, 2, 3}
     DENSE_NEURONS = [64,4096]         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
@@ -126,7 +126,7 @@ if __name__ == "__main__":
                     print(f"STARTING TRAINING with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
                     #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
                     model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-                    MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
+                    MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,23]_32_3_64_1.pth"
                     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
                     model.load_state_dict(state_dict)
                     print(model)

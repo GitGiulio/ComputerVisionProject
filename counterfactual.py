@@ -19,6 +19,7 @@ DEVICE = f"cuda:1" if torch.cuda.is_available() else "cpu"
 
 DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
 
+#MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
 MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_32_2_64_1.pth"
 
 OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/counterfactual_outputs"
@@ -32,7 +33,7 @@ MANUAL_CONV_LAYER = 3
 MANUAL_DENSE_NEURON = 64
 MANUAL_DENSE_LAYER = 1
 
-def generate_counterfactual(model, x, target_class, steps=200, lr=0.01, lam=0.01): 
+def generate_counterfactual(model, x, target_class, steps=200, lr=0.01, lam=0.5): 
 
     x_cf = x.clone().detach().requires_grad_(True)  # clone image
 
@@ -50,7 +51,7 @@ def generate_counterfactual(model, x, target_class, steps=200, lr=0.01, lam=0.01
 
         loss_l2 = torch.norm(x_cf - x)  # finds pixel change between orignal image and new image (image change measure) - prevents completly changing image
        
-        loss = loss_pred + lam * loss_l2   # Combined loss: match target class while staying close to original image
+        loss = (1 - lam) * loss_pred + lam * loss_l2   # Combined loss: match target class while staying close to original image
 
         loss.backward() 
         
@@ -59,7 +60,6 @@ def generate_counterfactual(model, x, target_class, steps=200, lr=0.01, lam=0.01
         x_cf.data.clamp_(0, 1)   
 
     return x_cf.detach() 
-
 
 
 if __name__ == "__main__":
@@ -87,16 +87,17 @@ if __name__ == "__main__":
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
+    print(model)
     # evaluate(model,val_loader,DEVICE)
     
     os.makedirs(OUT_DIR, exist_ok=True)
     
     # select dataset image
-    img_num = 15
+    img_num = 2
     dataset = val_loader.dataset
     
     for img_i in range(img_num):
-        img_i*=100
+        # img_i*=100
         x, y, _ = dataset[img_i]
         x = x.unsqueeze(0).to(DEVICE)
 
@@ -117,7 +118,10 @@ if __name__ == "__main__":
         # build heatmap
         diff = (x_cf - x).abs()
         diff = diff.mean(dim=1, keepdim=True)
-        diff = diff / diff.max()
+        #print(diff.max())
+        if diff.max() > 0.1:
+            print("WARNING: diff.max() higher than 0.1, higher values are set to the highest brightness")
+        diff = diff / 0.1 #diff.max()
 
         heatmap_np = diff.squeeze().cpu().numpy()
         heatmap_color = cm.hot(heatmap_np)[..., :3]
@@ -184,43 +188,4 @@ if __name__ == "__main__":
         plt.close()
 
         print(f"Image {img_i} saved")
-        
-        # save single combined image
-        # save_image(combined, f"{OUT_DIR}/comparison_hot_{img_i}.png")
-       
-    
-    #  Saves 3 seperate images
-    # # Counterfactual
-    # img_num = 100
-    # dataset = val_loader.dataset
-    # x, y, _ = dataset[img_num]
-    # x = x.unsqueeze(0).to(DEVICE)
-    
-    # # x_batch, y_batch, _ = next(iter(val_loader))
-    # # x = x_batch[img_num].unsqueeze(0).to(DEVICE)
-    # # y = y_batch[img_num].item()
-
-    # target_class = 1 - y
-
-    # x_cf = generate_counterfactual(model, x, target_class)
-        
-    # with torch.no_grad():
-    #     print("original:", torch.sigmoid(model(x)))
-    #     print("counterfactual:", torch.sigmoid(model(x_cf)))
-    
-    # diff = (x_cf - x).abs()
-    # diff = diff.mean(dim=1, keepdim=True)  # collapse RGB
-    # diff = diff / diff.max()
-
-    # heatmap = diff.squeeze().cpu().numpy()
-
-    # plt.imshow(heatmap, cmap="hot")
-    # plt.axis("off")
-    # plt.savefig(f"{OUT_DIR}/difference_heatmap_hot{img_num}.png", bbox_inches="tight", pad_inches=0)
-    # plt.close()
-
-   
-    
-    # save_image(x, f"{OUT_DIR}/original{img_num}.png")
-    # save_image(x_cf, f"{OUT_DIR}/counterfactual{img_num}.png")
-    # # save_image((x_cf - x).abs(), f"{OUT_DIR}/difference{img_num}.png")
+     
