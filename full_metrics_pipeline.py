@@ -282,13 +282,17 @@ def compute_fidelity(
         # --- Deletion ---
         deleted = image.to(device) * mask_tensor
         with torch.no_grad():
-            score_del = F.softmax(model(deleted.unsqueeze(0)), dim=1)[0, label].item()
+            # score_del = F.softmax(model(deleted.unsqueeze(0)), dim=1)[0, label].item()
+            score_del = torch.sigmoid(model(deleted.unsqueeze(0))).item() # Binary output
+            
         deletion_scores.append(score_del)
 
         # --- Insertion: reveal top pixels on a blurred/black baseline ---
         inserted = image.to(device) * (1 - mask_tensor)  # only top pixels visible
         with torch.no_grad():
-            score_ins = F.softmax(model(inserted.unsqueeze(0)), dim=1)[0, label].item()
+            # score_ins = F.softmax(model(inserted.unsqueeze(0)), dim=1)[0, label].item()
+            score_ins = torch.sigmoid(model(inserted.unsqueeze(0))).item()  # Binary output
+            
         insertion_scores.append(score_ins)
 
     # AUC via trapezoidal integration over evenly-spaced steps
@@ -806,6 +810,7 @@ if __name__ == "__main__":
     model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
     MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_32_2_64_1.pth"
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+    model.load_state_dict(state_dict) 
     model.eval()
 
     target_layer = find_last_conv_layer(model)
@@ -818,7 +823,7 @@ if __name__ == "__main__":
     config = EvalConfig(
         interpretability_method= "shap",
         target_layer           = target_layer,
-        n_samples              = 20,           # keep low for a quick test run
+        n_samples              = 100,           # keep low for a quick test run
         batch_size             = 8,
         device                 = "cuda" if torch.cuda.is_available() else "cpu",
         output_dir             = "./interpretability_results",
@@ -829,7 +834,7 @@ if __name__ == "__main__":
         separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
         smoothgrad_n_samples   = 30,
         smoothgrad_noise_std   = 0.15,
-        counterfactual_steps   = 1,
+        counterfactual_steps   = 100,
         counterfactual_lam     = 0.5
     )
 
