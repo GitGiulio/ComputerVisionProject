@@ -103,9 +103,9 @@ if __name__ == "__main__":
 
         # will generate a counterfactual toward 0 ("ai") instead of 1 ("nature")
         # and predictions will move toward 0 rather than 1. just a test
-        if y == 1:
-            continue
-        
+        # if y == 1:
+        #     continue
+
         target_class = 1 - y
 
         # generate counterfactual
@@ -121,7 +121,8 @@ if __name__ == "__main__":
         #print(diff.max())
         if diff.max() > 0.1:
             print("WARNING: diff.max() higher than 0.1, higher values are set to the highest brightness")
-        diff = diff / 0.1 #diff.max()
+        # diff = diff / 0.1 #diff.max()'
+        diff = diff / diff.max()
 
         heatmap_np = diff.squeeze().cpu().numpy()
         heatmap_color = cm.hot(heatmap_np)[..., :3]

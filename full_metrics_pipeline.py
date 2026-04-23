@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import transforms
+from counterfactual import generate_counterfactual
 
 
 def _try_import(module_name: str, pip_name: str):
@@ -66,6 +67,10 @@ class EvalConfig:
     # SmoothGrad
     smoothgrad_n_samples: int = 50
     smoothgrad_noise_std: float = 0.15
+    
+    # Counterfactual
+    counterfactual_steps: int = 200
+    counterfactual_lam: float = 0.5
 
 
 @dataclass
@@ -103,7 +108,7 @@ class Explainer:
         config: EvalConfig instance.
     """
 
-    SUPPORTED = {"shap", "gradcam","counterfactuals (TODO)"} #OTHERS:  "lime", "gradcam++", "intgrad", "smoothgrad"}
+    SUPPORTED = {"shap", "gradcam","counterfactuals"} #OTHERS:  "lime", "gradcam++", "intgrad", "smoothgrad"}
 
     def __init__(self, method: str, model: torch.nn.Module, config: EvalConfig):
         self.method = method.lower()
@@ -206,8 +211,29 @@ class Explainer:
         Returns:
             Normalised saliency map (H, W).
         """
-        print("NOT IMPLEMENTED YET")
-        pass
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        
+        target_class = 1 - label
+        x = img.unsqueeze(0).to(self.device)
+        
+        x_cf = generate_counterfactual(
+            self.model, x, target_class,
+            steps=self.config.counterfactual_steps,
+            lam=self.config.counterfactual_lam,
+        )
+        
+        diff = (x_cf - x).abs().mean(dim=1).squeeze()
+        
+        # Does it flip the class check
+        # with torch.no_grad():
+        #     orig_prob = torch.sigmoid(self.model(x)).item()
+        #     cf_prob = torch.sigmoid(self.model(x_cf)).item()
+        #     print(f"Original: {orig_prob:.3f} → Counterfactual: {cf_prob:.3f}")
+            
+        return _normalise(diff.cpu().numpy())
+    
+        
 
 
 def compute_fidelity(
@@ -332,6 +358,11 @@ def compute_identity(
     """
     sal1 = explainer.explain(image, label)
     sal2 = explainer.explain(image, label)
+
+    
+    # diff = np.max(np.abs(sal1 - sal2))
+    # print(f"  [{explainer.method}] identity max diff: {diff:.2e}")  # e.g. 1.23e-06
+    
     return 1.0 if np.allclose(sal1, sal2, atol=tol) else 0.0
 
 
@@ -782,7 +813,7 @@ if __name__ == "__main__":
    # train_loader, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     val_dataset = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=get_tensor_transform())
 
-    methods_to_evaluate = ["gradcam", "shap"]#, "counterfactuals(TODO)"]
+    methods_to_evaluate = ["gradcam", "shap", "counterfactuals"]#, "counterfactuals(TODO)"]
 
     config = EvalConfig(
         interpretability_method= "shap",
@@ -795,9 +826,11 @@ if __name__ == "__main__":
         stability_n_perturbations = 5,
         stability_noise_std    = 0.05,
         separability_n_pairs   = 20,
-        separability_eps       = 1e-3,
+        separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
         smoothgrad_n_samples   = 30,
         smoothgrad_noise_std   = 0.15,
+        counterfactual_steps   = 1,
+        counterfactual_lam     = 0.5
     )
 
     results = run_pipeline(model, val_dataset, methods_to_evaluate, config)
