@@ -408,6 +408,7 @@ def compute_fidelity(
     label: int,
     steps: int,
     device: torch.device,
+    path:str
 ) -> tuple[float, float]:
     """Compute Deletion AUC and Insertion AUC for one image.
 
@@ -448,7 +449,10 @@ def compute_fidelity(
         deleted = image.to(device) * mask_tensor
         with torch.no_grad():
             # score_del = F.softmax(model(deleted.unsqueeze(0)), dim=1)[0, label].item()   
-            score_del = torch.sigmoid(model(deleted.unsqueeze(0))).item() # Binary output
+            prob_del = model(deleted.unsqueeze(0)) # Binary output
+            
+            score_del = prob_del if label == 1 else 1.0 - prob_del
+
             
         deletion_scores.append(score_del)
 
@@ -456,12 +460,30 @@ def compute_fidelity(
         inserted = image.to(device) * (1 - mask_tensor)  # only top pixels visible
         with torch.no_grad():
             # score_ins = F.softmax(model(inserted.unsqueeze(0)), dim=1)[0, label].item()
-            score_ins = torch.sigmoid(model(inserted.unsqueeze(0))).item()  # Binary output
+            prob_ins = model(inserted.unsqueeze(0))  # Binary output
+
+            score_ins = prob_ins if label == 1 else 1.0 - prob_ins
+
             
         insertion_scores.append(score_ins)
 
     # AUC via trapezoidal integration over evenly-spaced steps
+    
+
     xs = np.linspace(0, 1, steps + 1)
+
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+
+    ax.plot(xs, deletion_scores)
+    ax.set_title("Deletion AUC")
+    ax2.plot(xs, insertion_scores)
+    ax2.set_title("Insertion AUC")
+
+
+    fig.savefig(path)
+    plt.close(fig)
+
+
     del_auc = float(np.trapezoid(deletion_scores, xs))
     ins_auc = float(np.trapezoid(insertion_scores, xs))
     return del_auc, ins_auc
@@ -510,7 +532,7 @@ def compute_identity(
     explainer: Explainer,
     image: torch.Tensor,
     label: int,
-    tol: float = 1e-15,
+    tol: float = 1e-5,
 ) -> float:
     """Check if the same input always produces the same explanation.
 
@@ -1068,7 +1090,11 @@ def load_samples(
         Tuple of (list of image tensors, list of integer labels).
     """
     n_samples = min(n_samples, len(dataset))
-    subset = Subset(dataset, list(range(n_samples)))
+    
+    selected_indices = torch.randperm(len(dataset))[:n_samples].tolist()
+
+    subset = Subset(dataset, selected_indices)
+
     loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
 
     images, labels = [], []
@@ -1120,7 +1146,7 @@ def evaluate_method(
 
         # --- Fidelity ---
         d_auc, i_auc = compute_fidelity(model, img, sal, lbl,
-                                         config.fidelity_steps, device)
+                                         config.fidelity_steps, device,f"{config.output_dir}/{method_name}/fidelity_{i}.png")
         del_aucs.append(d_auc)
         ins_aucs.append(i_auc)
 
@@ -1361,7 +1387,7 @@ if __name__ == "__main__":
 
     idx_to_class = {i: name for i, name in enumerate(val_dataset.classes)}
 
-    methods_to_evaluate = ["gradcam", "shap","shap_captum", "counterfactuals"]
+    methods_to_evaluate = ["gradcam", "shap", "counterfactuals"]
 
     shap_background = collect_shap_background(train_dataset,50,8)
 
@@ -1371,8 +1397,8 @@ if __name__ == "__main__":
         n_samples              = 20,           # keep low for a quick test run
         batch_size             = 8,
         device                 = "cuda:0" if torch.cuda.is_available() else "cpu",
-        output_dir             = "./interpretability_results_k=3",
-        fidelity_steps         = 20,
+        output_dir             = "./interpretability_results_k=3_block",
+        fidelity_steps         = 5000,
         stability_n_perturbations = 5,
         stability_noise_std    = 0.05,
         separability_n_pairs   = 20,

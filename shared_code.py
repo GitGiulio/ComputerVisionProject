@@ -10,9 +10,9 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 import numpy as np
 from torch.amp import autocast
 #from tqdm import tqdm
-DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
+DATA_DIR = "/mnt/scratch/Cat_dog/PetImages/"
 
-IMAGE_SIZE = 256
+IMAGE_SIZE = 224
 
 def get_tensor_transform():
     _use_v2 = False

@@ -1,0 +1,4 @@
+method,deletion_auc,insertion_auc,stability,identity,separability,avg_time_sec
+gradcam,0.620971,0.621683,0.954523,1.0,1.0,0.016842
+shap,0.614602,0.602675,0.606943,1.0,1.0,0.370563
+counterfactuals,0.600074,0.60096,1.001656,0.0,1.0,0.2044

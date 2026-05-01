@@ -11,18 +11,18 @@ from torchvision.io import read_image
 import shap
 from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN, I_HAVE_A_THEORY, parse_hparams_from_model_path, evaluate
 
-DEVICE = f"cuda:1" if torch.cuda.is_available() else "cpu"
+DEVICE = f"cuda:0" if torch.cuda.is_available() else "cpu"
 
-DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
+DATA_DIR = "/mnt/scratch/Cat_dog/PetImages/"
 
-MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
+MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/cat_dog/cat_dog_model_kernel=3_32_3_64_1.pth"
 
 BATCH_SIZE = 64
-IMAGE_SIZE = 256
+IMAGE_SIZE = 224
 
 NUM_BACKGROUND = 50
 NUM_EXPLAIN = 10
-OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs/kernel2=[5,9,17]"
+OUT_DIR = "/home/cv04f26/ComputerVisionProject/interpretability/shap_outputs/cat_dog/k=3"
 
 EXPLAIN_PROBABILITY = True
 
@@ -201,8 +201,8 @@ if __name__ == "__main__":
     print(f"  dense_neuron= {dense_neuron}")
     print(f"  dense_layer = {dense_layer}")
 
-    model = I_HAVE_A_THEORY( # CIFAKE_CNN | I_HAVE_A_THEORY
-        kernel_size=17,
+    model = CIFAKE_CNN( # CIFAKE_CNN | I_HAVE_A_THEORY
+        #kernel_size=17,
         conv_filters=conv_filter,
         conv_layers=conv_layer,
         dense_neurons=dense_neuron,

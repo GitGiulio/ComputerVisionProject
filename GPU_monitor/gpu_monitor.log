@@ -8,3 +8,60 @@
 [2026-05-01 12:13:06] Status — GPU 0: 0% | GPU 1: 0%
 [2026-05-01 12:13:06] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
 [2026-05-01 12:13:06] Notified chat_id=8548136250
+[2026-05-01 12:23:09] Status — GPU 0: 74% | GPU 1: 0%
+[2026-05-01 12:23:09] ALERT: Free GPU(s) — GPU 1 (0%). Broadcasting.
+[2026-05-01 12:23:09] Notified chat_id=8548136250
+[2026-05-01 12:33:11] Status — GPU 0: 99% | GPU 1: 99%
+[2026-05-01 12:43:13] Status — GPU 0: 100% | GPU 1: 100%
+[2026-05-01 12:53:14] Command from chat_id=159747059 (Giulio): /status
+[2026-05-01 12:53:14] Status — GPU 0: 100% | GPU 1: 100%
+[2026-05-01 13:03:16] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 13:03:16] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 13:03:17] Notified chat_id=8548136250
+[2026-05-01 13:13:19] Status — GPU 0: 100% | GPU 1: 0%
+[2026-05-01 13:13:19] ALERT: Free GPU(s) — GPU 1 (0%). Broadcasting.
+[2026-05-01 13:13:19] Notified chat_id=8548136250
+[2026-05-01 13:23:21] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 13:23:21] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 13:23:22] Notified chat_id=8548136250
+[2026-05-01 13:33:24] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 13:33:24] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 13:33:24] Notified chat_id=8548136250
+[2026-05-01 13:43:27] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 13:43:27] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 13:43:27] Notified chat_id=8548136250
+[2026-05-01 13:53:29] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 13:53:29] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 13:53:30] Notified chat_id=8548136250
+[2026-05-01 14:03:32] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 14:03:32] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 14:03:32] Notified chat_id=8548136250
+[2026-05-01 14:13:34] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 14:13:34] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 14:13:35] Notified chat_id=8548136250
+[2026-05-01 14:23:37] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 14:23:37] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 14:23:37] Notified chat_id=8548136250
+[2026-05-01 14:33:40] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 14:33:40] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 14:33:40] Notified chat_id=8548136250
+[2026-05-01 14:43:42] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 14:43:42] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 14:43:43] Notified chat_id=8548136250
+[2026-05-01 14:53:43] Command from chat_id=8548136250 (Mat): /pause
+[2026-05-01 14:53:43] Paused chat_id=8548136250
+[2026-05-01 14:53:43] Status — GPU 0: 79% | GPU 1: 0%
+[2026-05-01 14:53:43] ALERT: Free GPU(s) — GPU 1 (0%). Broadcasting.
+[2026-05-01 14:53:43] Skipped chat_id=8548136250 (paused)
+[2026-05-01 15:03:46] Status — GPU 0: 98% | GPU 1: 0%
+[2026-05-01 15:03:46] ALERT: Free GPU(s) — GPU 1 (0%). Broadcasting.
+[2026-05-01 15:03:46] Skipped chat_id=8548136250 (paused)
+[2026-05-01 15:13:48] Status — GPU 0: 0% | GPU 1: 44%
+[2026-05-01 15:13:48] ALERT: Free GPU(s) — GPU 0 (0%). Broadcasting.
+[2026-05-01 15:13:48] Skipped chat_id=8548136250 (paused)
+[2026-05-01 15:23:50] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 15:23:50] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 15:23:50] Skipped chat_id=8548136250 (paused)
+[2026-05-01 15:33:53] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 15:33:53] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 15:33:53] Skipped chat_id=8548136250 (paused)
