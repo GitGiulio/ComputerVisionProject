@@ -1,0 +1,10 @@
+[2026-05-01 12:02:25] GPU monitor started (threshold: <9%, interval: 600s)
+[2026-05-01 12:02:27] Status — GPU 0: 80% | GPU 1: 99%
+[2026-05-01 12:03:03] GPU monitor started (threshold: <9%, interval: 600s)
+[2026-05-01 12:03:05] Status — GPU 0: 99% | GPU 1: 83%
+[2026-05-01 12:13:05] Command from chat_id=159747059 (Giulio): /status
+[2026-05-01 12:13:06] Command from chat_id=159747059 (Giulio): /pause
+[2026-05-01 12:13:06] Paused chat_id=159747059
+[2026-05-01 12:13:06] Status — GPU 0: 0% | GPU 1: 0%
+[2026-05-01 12:13:06] ALERT: Free GPU(s) — GPU 0 (0%),GPU 1 (0%). Broadcasting.
+[2026-05-01 12:13:06] Notified chat_id=8548136250

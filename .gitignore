@@ -8,3 +8,6 @@
 /Frederik/best_*
 /.vscode
 /__pycache__
+/GPU_monitor/.bot_token
+/GPU_monitor/chat_ids.txt
+/GPU_monitor/user_state.json
