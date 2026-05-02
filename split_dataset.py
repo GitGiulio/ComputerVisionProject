@@ -3,8 +3,8 @@ import random
 import shutil
 from pathlib import Path
 
-SRC_DIR = "/mnt/scratch/Stable_diffusion/Cat_dog/PetImages"
-DST_DIR = "/mnt/scratch/Cat_dog/PetImages_split"
+SRC_DIR = "./DATA/Cat_dog/PetImages"
+DST_DIR = "./DATA/Cat_dog_splitted"
 
 SPLITS = {
     "train": 0.70,

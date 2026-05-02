@@ -68,7 +68,7 @@ class EvalConfig:
         target_layer: The nn.Module layer used by gradient-based methods
                       (GradCAM, GradCAM++). Not needed for LIME/SHAP/IntGrad.
         n_samples: Number of images to evaluate on.
-        batch_size: DataLoader batch size.
+        batch_size: DataLoader batch size.da
         device: 'cuda' or 'cpu'.
         output_dir: Folder where plots and CSV are saved.
         # Metric-specific knobs
@@ -86,7 +86,7 @@ class EvalConfig:
     target_layer: Optional[torch.nn.Module] = None
     n_samples: int = 50
     batch_size: int = 8
-    device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "./interpretability_results"
     # Fidelity
     fidelity_steps: int = 20
@@ -449,31 +449,34 @@ def compute_fidelity(
         deleted = image.to(device) * mask_tensor
         with torch.no_grad():
             # score_del = F.softmax(model(deleted.unsqueeze(0)), dim=1)[0, label].item()   
-            prob_del = model(deleted.unsqueeze(0)) # Binary output
+            prob_del = F.sigmoid(model(deleted.unsqueeze(0))) # Binary output
             
             score_del = prob_del if label == 1 else 1.0 - prob_del
 
             
-        deletion_scores.append(score_del)
+        deletion_scores.append(score_del.item())
 
         # --- Insertion: reveal top pixels on a blurred/black baseline ---
         inserted = image.to(device) * (1 - mask_tensor)  # only top pixels visible
         with torch.no_grad():
             # score_ins = F.softmax(model(inserted.unsqueeze(0)), dim=1)[0, label].item()
-            prob_ins = model(inserted.unsqueeze(0))  # Binary output
+            prob_ins = F.sigmoid(model(inserted.unsqueeze(0)))  # Binary output
 
             score_ins = prob_ins if label == 1 else 1.0 - prob_ins
 
             
-        insertion_scores.append(score_ins)
+        insertion_scores.append(score_ins.item())
 
     # AUC via trapezoidal integration over evenly-spaced steps
     
 
     xs = np.linspace(0, 1, steps + 1)
 
-    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    del_auc = float(np.trapezoid(deletion_scores, xs))
+    ins_auc = float(np.trapezoid(insertion_scores, xs))
 
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    
     ax.plot(xs, deletion_scores)
     ax.set_title("Deletion AUC")
     ax2.plot(xs, insertion_scores)
@@ -483,9 +486,6 @@ def compute_fidelity(
     fig.savefig(path)
     plt.close(fig)
 
-
-    del_auc = float(np.trapezoid(deletion_scores, xs))
-    ins_auc = float(np.trapezoid(insertion_scores, xs))
     return del_auc, ins_auc
 
 
@@ -1095,7 +1095,7 @@ def load_samples(
 
     subset = Subset(dataset, selected_indices)
 
-    loader = DataLoader(subset, batch_size=batch_size, shuffle=False)
+    loader = DataLoader(subset, batch_size=batch_size, shuffle=False,collate_fn=collate_skip_none)
 
     images, labels = [], []
     for imgs, lbls, _ in loader:
@@ -1230,6 +1230,10 @@ def run_pipeline(
     all_results: dict[str, MetricResults] = {}
 
     for method in methods:
+        
+        method_dir = os.path.join(config.output_dir, method)
+        os.makedirs(method_dir, exist_ok=True)
+
         results, sal_maps = evaluate_method(method, model, images, labels, config)
         all_results[method] = results
 
@@ -1344,6 +1348,7 @@ def collect_shap_background(
         Subset(dataset, selected_idxs),
         batch_size=batch_size,
         shuffle=False,
+        collate_fn=collate_skip_none,
     )
 
     imgs_list = []
@@ -1365,45 +1370,47 @@ def collect_shap_background(
 if __name__ == "__main__":
     import os
     import torchvision
-    from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder
+    from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder,collate_skip_none
     from Grad_cam_visual import find_last_conv_layer
 
-    DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
-    DEVICE =  f"cuda:0" if torch.cuda.is_available() else "cpu"
-    BATCH_SIZE = 8
-    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 0,32,2,64,1
+    DATA_DIR = "./DATA/Cat_dog_splitted/"
+    DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
+    BATCH_SIZE = 100
+    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 3,32,3,4096,1
 
-    model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-    MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_32_2_64_1.pth"
+    #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+    model = I_HAVE_A_THEORY(23,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+    MODEL_PATH = "./models/model_kernel=[5,9,23]_32_3_4096_1.pth"
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict) 
     model.eval()
 
     target_layer = find_last_conv_layer(model)
 
-   # train_loader, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
+    #train_loader, val_dataset, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     train_dataset = SafeImageFolder(os.path.join(DATA_DIR, "train"),   transform=get_tensor_transform())
     val_dataset = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=get_tensor_transform())
+    test_dataset = SafeImageFolder(os.path.join(DATA_DIR, "test"),   transform=get_tensor_transform())
 
     idx_to_class = {i: name for i, name in enumerate(val_dataset.classes)}
 
     methods_to_evaluate = ["gradcam", "shap", "counterfactuals"]
 
-    shap_background = collect_shap_background(train_dataset,50,8)
+    shap_background = collect_shap_background(train_dataset,100,100)
 
     config = EvalConfig(
         #interpretability_method= "shap",
         target_layer           = target_layer,
-        n_samples              = 20,           # keep low for a quick test run
-        batch_size             = 8,
-        device                 = "cuda:0" if torch.cuda.is_available() else "cpu",
-        output_dir             = "./interpretability_results_k=3_block",
-        fidelity_steps         = 5000,
+        n_samples              = 32,           # keep low for a quick test run
+        batch_size             = 32,
+        device                 = "cuda" if torch.cuda.is_available() else "cpu",
+        output_dir             = "./interpretability_results_dogs_k=23_32_3_4096_1",
+        fidelity_steps         = 2000,
         stability_n_perturbations = 5,
         stability_noise_std    = 0.05,
         separability_n_pairs   = 20,
         separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
-        counterfactual_steps   = 100,
+        counterfactual_steps   = 200,
         counterfactual_lam     = 0.5,
         shap_background           = shap_background,
         shap_explain_probability  = False,         # True = explain sigmoid probs

@@ -11,9 +11,9 @@ from torchvision.io import read_image
 import shap
 from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN, I_HAVE_A_THEORY, parse_hparams_from_model_path, evaluate
 
-DEVICE = f"cuda:0" if torch.cuda.is_available() else "cpu"
+DEVICE = f"cuda" if torch.cuda.is_available() else "cpu"
 
-DATA_DIR = "/mnt/scratch/Cat_dog/PetImages/"
+DATA_DIR = "./DATA/Cat_dog_splitted/"
 
 MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/cat_dog/cat_dog_model_kernel=3_32_3_64_1.pth"
 
@@ -184,7 +184,7 @@ def save_shap_visualizations(images_tensor, shap_values, probs, labels, paths, i
 if __name__ == "__main__":
     print("DEVICE:", DEVICE)
 
-    train_loader, val_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
+    train_loader, val_loader,test_loaedr, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     print("Class mapping:", idx_to_class)
 
     if USE_FILENAME_HPARAMS:

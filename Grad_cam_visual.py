@@ -26,7 +26,7 @@ NUM_CAM_SAMPLES = 10
 IMAGE_SIZE = 256
 DEVICE = f"cuda:1" if torch.cuda.is_available() else "cpu"
 
-DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
+DATA_DIR = "./DATA/Cat_dog_splitted/"
 
 MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,17]_32_3_64_1.pth"
 
@@ -207,7 +207,7 @@ def generate_gradcam_samples(model,test_loader,idx_to_class,n_samples):
 if __name__ == "__main__":
     print("DEVICE:", DEVICE)
 
-    train_loader, val_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
+    train_loader, val_loader,test_loaedr, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     print("Class mapping:", idx_to_class)
 
     if USE_FILENAME_HPARAMS:

@@ -10,7 +10,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 import numpy as np
 from torch.amp import autocast
 #from tqdm import tqdm
-DATA_DIR = "/mnt/scratch/Cat_dog/PetImages/"
+DATA_DIR = "./DATA/Cat_dog_splitted/"
 
 IMAGE_SIZE = 224
 
@@ -55,7 +55,13 @@ class SafeImageFolder(datasets.ImageFolder):
     def __getitem__(self, index):
         path, target = self.samples[index]
         try:
+            devnull = open(os.devnull, 'w')
+            old_stderr = os.dup(2)
+            os.dup2(devnull.fileno(), 2)
             img = read_image(path)  # uint8 tensor [C,H,W]
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
+            devnull.close()
             if img.ndim != 3:
                 return None
 
@@ -91,6 +97,7 @@ def data_loaders(DEVICE,BATCH_SIZE,):
     tensor_transform = get_tensor_transform()
     train_data = SafeImageFolder(os.path.join(DATA_DIR, "train"), transform=tensor_transform)
     val_data   = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=tensor_transform)
+    test_data   = SafeImageFolder(os.path.join(DATA_DIR, "test"),   transform=tensor_transform)
 
     pin_mem = DEVICE.startswith("cuda")
 
@@ -117,7 +124,7 @@ def data_loaders(DEVICE,BATCH_SIZE,):
     )
 
     idx_to_class = {v: k for k, v in train_data.class_to_idx.items()}
-    return train_loader, val_loader, idx_to_class
+    return train_loader, val_loader, test_data, idx_to_class
 
 
 class CIFAKE_CNN(nn.Module):

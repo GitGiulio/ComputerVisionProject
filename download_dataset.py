@@ -3,7 +3,7 @@ import shutil
 import kagglehub
 # 70, 15, 15 - Train, eval, test
 
-DATA_DIR = "/mnt/scratch/Stable_diffusion/Cat_dog"
+DATA_DIR = "./DATA/Cat_dog"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Download dataset (cached by kagglehub)

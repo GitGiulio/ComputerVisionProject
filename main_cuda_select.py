@@ -9,16 +9,11 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN,I_HAVE_A_THEORY, parse_hparams_from_model_path, GradCAM
 
+DATA_DIR = "./DATA/Cat_dog_splitted/" # Cat dog
 
-device_number=0
-
-# DATA_DIR = "/mnt/scratch/Stable_diffusion/Stable_diffusion_ready"
-DATA_DIR = "/mnt/scratch/Cat_dog/PetImages/" # Cat dog
-
-BATCH_SIZE = 256
-#LR = 1e-3 old one
-LR = 1e-5
-EPOCHS = 5
+BATCH_SIZE = 512
+LR = 1e-3
+EPOCHS = 30
 
 torch.backends.cudnn.benchmark = True
 
@@ -29,12 +24,12 @@ DENSE_NEURON = None         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
 DENSE_LAYER = None           # {1, 2, 3}
 
 # Grad-CAM / output config
-OUT_DIR = "/home/cv04f26/ComputerVisionProject/gradcam_outputs"
+OUT_DIR = "./ComputerVisionProject/gradcam_outputs"
 NUM_CAM_SAMPLES = 12
 IMAGE_SIZE = 224
 
 
-def train_one_epoch(epoch,train_loader):
+def train_one_epoch(epoch,train_loader,scheduler):
     model.train()
     running_loss = 0.0
     steps = 0
@@ -50,14 +45,14 @@ def train_one_epoch(epoch,train_loader):
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda:{device_number}")):
+        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda")):
             logits = model(images)
             loss = criterion(logits, labels)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-
+        scheduler.step()
         running_loss += loss.item()
         steps += 1
         #loop.set_postfix(loss=(running_loss / max(steps, 1)))
@@ -70,7 +65,7 @@ def evaluate(model,test_loader):
     preds, trues = [], []
 
     with torch.no_grad():
-        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda:{device_number}")):
+        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda")):
             for batch in test_loader:
                 if batch is None:
                     continue
@@ -102,45 +97,50 @@ def evaluate(model,test_loader):
 
 
 if __name__ == "__main__":
+
     KERNEL_SIZES = [5,9,23]
     CONV_FILTERS = [32,64]          # {16, 32, 64, 128}
-    CONV_LAYERS = [2, 3]            # {1, 2, 3}
+    CONV_LAYERS = [3, 3]            # {1, 2, 3}
     DENSE_NEURONS = [64,4096]         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
     DENSE_LAYERS = [1,3]           # {1, 2, 3}
     
-    ok = True
-    while ok:
-        device_number = 0
-        #int(input("WHAT GPU DO YOU WANNA USE? 0 or 1?"))
-        if device_number in [0,1]:
-            ok = False
-    DEVICE = f"cuda:{device_number}" if torch.cuda.is_available() else "cpu"
+    DEVICE = f"cuda" if torch.cuda.is_available() else "cpu"
 
     print(DEVICE)
-    train_loader, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
-    CONV_FILTER = CONV_FILTERS[device_number]
-    for CONV_LAYER in CONV_LAYERS:
-        for DENSE_NEURON in DENSE_NEURONS:
-            for DENSE_LAYER in DENSE_LAYERS:
-                KERNEL_SIZE = KERNEL_SIZES[2]
-                try:
-                    print("---------------------------------------------------------")
-                    print(f"STARTING TRAINING with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
-                    model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-                    #model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-                    #MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,23]_32_3_64_1.pth"
-                    #state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-                    #model.load_state_dict(state_dict)
-                    print(model)
-                    # Use logits-safe, autocast-safe BCEWithLogitsLoss
-                    criterion = nn.BCEWithLogitsLoss()
-                    optimizer = optim.Adam(model.parameters(), lr=LR)
-                    scaler = GradScaler(enabled=(DEVICE == f"cuda:{device_number}"))
-                    for epoch in range(EPOCHS):
-                        train_one_epoch(epoch,train_loader)
-                        torch.save(obj=model.state_dict(),f=f"/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
-                    accuracy, precision, recall, f1 = evaluate(model,train_loader)
-                except Exception as e:
-                    print(f"FAILED with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
-                    print(e)
-                break
+    train_loader,val_loaedr, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
+    for CONV_FILTER in CONV_FILTERS:
+        for CONV_LAYER in CONV_LAYERS:
+            for DENSE_NEURON in DENSE_NEURONS:
+                for DENSE_LAYER in DENSE_LAYERS:
+                    #KERNEL_SIZE = KERNEL_SIZES[2]
+                    try:
+                        print("---------------------------------------------------------")
+                        print(f"STARTING TRAINING with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
+                        #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+                        model = I_HAVE_A_THEORY(23,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+                        #MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,23]_32_3_64_1.pth"
+                        #state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+                        #model.load_state_dict(state_dict)
+                        print(model)
+                        # Use logits-safe, autocast-safe BCEWithLogitsLoss
+                        criterion = nn.BCEWithLogitsLoss()
+                        optimizer = optim.Adam(model.parameters(), lr=LR)
+                        scaler = GradScaler(enabled=(DEVICE == f"cuda"))
+                        scheduler = optim.lr_scheduler.OneCycleLR(
+                            optimizer,
+                            max_lr=1e-3,
+                            steps_per_epoch=len(train_loader),
+                            epochs=EPOCHS,
+                            pct_start=0.1,
+                            anneal_strategy='cos',
+                            final_div_factor=1000
+                        )
+                        for epoch in range(EPOCHS):
+                            train_one_epoch(epoch,train_loader,scheduler)
+                            #torch.save(obj=model.state_dict(),f=f"/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
+                            torch.save(obj=model.state_dict(),f=f"./models/model_kernel=[5,9,23]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
+                        accuracy, precision, recall, f1 = evaluate(model,val_loaedr)
+                        
+                    except Exception as e:
+                        print(f"FAILED with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
+                        print(e)
