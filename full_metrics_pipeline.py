@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import transforms
-from counterfactual import generate_counterfactual
 
 
 def _try_import(module_name: str, pip_name: str):
@@ -131,7 +130,10 @@ class MetricResults:
 class Explainer:
     """Wraps multiple Interpretability backends behind a single `.explain()` interface.
 
-    All methods return a saliency map as a numpy array of shape (H, W), normalised to [0, 1].
+    All methods return a saliency map as a numpy array of shape (C, H, W),
+    preserving per-channel attribution information. Callers that need a 2-D
+    summary (e.g. visualisation) should collapse the channel axis themselves
+    (e.g. ``sal.mean(axis=0)``).
 
     Args:
         method: Interpretability method name.
@@ -139,7 +141,7 @@ class Explainer:
         config: EvalConfig instance.
     """
 
-    SUPPORTED = {"shap", "gradcam","counterfactuals","shap_captum"} 
+    SUPPORTED = {"shap", "gradcam"}
 
     def __init__(self, method: str, model: torch.nn.Module, config: EvalConfig):
         self.method = method.lower()
@@ -175,20 +177,20 @@ class Explainer:
             h.remove()
 
     def explain(self, image_tensor: torch.Tensor, label: int) -> np.ndarray:
-        """Generate a saliency map for a single image.
+        """Generate a per-channel saliency map for a single image.
 
         Args:
             image_tensor: Float tensor of shape (C, H, W), already normalised.
             label: Ground-truth (or predicted) class index.
 
         Returns:
-            2-D numpy array of shape (H, W) with values in [0, 1].
+            3-D numpy array of shape (C, H, W) with per-channel attributions.
+            GradCAM broadcasts its single-channel map across all C channels.
+            SHAP returns per-channel values normalised by their max absolute value.
         """
         dispatch = {
             "shap":      self._explain_shap,
-            "shap_captum":      self._explain_shap_captum,
             "gradcam":   self._explain_gradcam,
-            "counterfactuals":   self._explain_counterfactuals,
         }
         return dispatch[self.method](image_tensor, label)
 
@@ -249,8 +251,10 @@ class Explainer:
     def _explain_gradcam(self, img: torch.Tensor, label: int) -> np.ndarray:
         """GradCAM: gradient-weighted average of conv feature maps.
 
-        Returns a normalised map for use in metrics. Use gradcam_raw_map()
-        directly if you need the unnormalised values for visualisation.
+        Returns a normalised map broadcast across all input channels so the
+        output shape is (C, H, W), matching the other explain methods.
+        Use gradcam_raw_map() directly if you need the unnormalised (H, W) map
+        for visualisation.
 
         Args:
             img: Image tensor (C, H, W).
@@ -259,29 +263,12 @@ class Explainer:
                    matching the original use_logits=True behaviour.
 
         Returns:
-            Normalised saliency map (H, W), values in [0, 1].
+            Saliency map (C, H, W), values in [0, 1], identical across channels.
         """
-        raw = self._gradcam_raw(img.to(self.device))
-        return _normalise(raw)
-
-    def _explain_shap_captum(self, img: torch.Tensor, label: int) -> np.ndarray:
-        """GradientSHAP: SHAP values via expected gradients w.r.t. baselines.
-
-        Args:
-            img: Image tensor (C, H, W).
-            label: Target class index.
-
-        Returns:
-            Normalised saliency map (H, W).
-        """
-        captum = _try_import("captum.attr", "captum")
-        gs = captum.GradientShap(self.model)
-        x = img.unsqueeze(0).to(self.device)
-        # Baseline: zero tensor (black image)
-        baseline = torch.zeros_like(x)
-        attrs = gs.attribute(x, baselines=baseline, target=label)
-        sal = attrs.squeeze().abs().sum(dim=0).cpu().numpy()
-        return _normalise(sal)
+        raw = self._gradcam_raw(img.to(self.device))          # (H, W)
+        normalised_hw = _normalise(raw)                        # (H, W)
+        C = img.shape[0]
+        return np.stack([normalised_hw] * C, axis=0)           # (C, H, W)
     
     def _explain_shap(self, img: torch.Tensor, label: int) -> np.ndarray:
         """SHAP via shap.DeepExplainer with a background reference distribution.
@@ -294,7 +281,9 @@ class Explainer:
             label: Unused (binary single-output model assumed).
 
         Returns:
-            Saliency map (H, W) with values in [-1, 1] (signed) (channel-summed heatmap).
+            Per-channel saliency map (C, H, W) with values in [-1, 1],
+            symmetrically normalised by the global max absolute value across
+            all channels.
         """
         shap_lib = _try_import("shap", "shap")
 
@@ -318,18 +307,19 @@ class Explainer:
 
         shap_arr = np.array(shap_vals)  # (1, C, H, W) or (1, H, W, C)
 
-        # Normalise axis order to (H, W, C) for channel summation
+        # Normalise axis order to (1, C, H, W)
         if shap_arr.ndim == 5 and shap_arr.shape[-1] == 1:
             shap_arr = shap_arr[..., 0]
-        if shap_arr.ndim == 4 and shap_arr.shape[1] in [1, 3]:
-            shap_arr = np.transpose(shap_arr, (0, 2, 3, 1))
+        if shap_arr.ndim == 4 and shap_arr.shape[-1] in [1, 3]:
+            # (1, H, W, C) → (1, C, H, W)
+            shap_arr = np.transpose(shap_arr, (0, 3, 1, 2))
 
-        # Sum across RGB channels → (H, W), preserving sign
-        heatmap = shap_arr[0].sum(axis=-1)
+        # shap_arr[0] is now (C, H, W)
+        chw = shap_arr[0].astype(np.float32)
 
-        # Symmetric normalisation: divide by max abs value so range is [-1, 1]
-        max_abs = np.max(np.abs(heatmap)) + 1e-8
-        return (heatmap / max_abs).astype(np.float32)
+        # Symmetric normalisation by global max-abs so range is [-1, 1]
+        max_abs = np.max(np.abs(chw)) + 1e-8
+        return (chw / max_abs)  # (C, H, W)
 
     def shap_raw_values(self, img: torch.Tensor) -> np.ndarray:
         """Return raw per-channel SHAP values without normalisation.
@@ -366,39 +356,78 @@ class Explainer:
             arr = np.transpose(arr, (0, 2, 3, 1))
         return arr[0]  # (H, W, C)
 
-    def _explain_counterfactuals(self, img: torch.Tensor, label: int) -> np.ndarray:
-        """Counterfactuals: we can use it to evaluate contribution of each pixel to the final decision
+        
+def get_captum_fidelity(
+    model: torch.nn.Module,
+    image: torch.Tensor,
+    attributions: np.ndarray,
+    label: int,
+    device: torch.device,
+    steps: int = 50
+) -> tuple[float, float]:
+    """Compute insertion and deletion AUC using Captum.
 
-        Args:
-            img: Image tensor (C, H, W).
-            label: Target class index.
+    Args:
+        model: PyTorch model in eval mode.
+        image: Image tensor (C, H, W).
+        attributions: Per-channel saliency map (C, H, W) from Explainer.explain().
+                      Must match the spatial and channel dimensions of ``image``.
+        label: Ground-truth class index (0 or 1 for binary).
+        device: Torch device.
+        steps: Number of perturbation steps for the AUC curves.
 
-        Returns:
-            Normalised saliency map (H, W).
-        """
-        torch.manual_seed(42)
-        torch.cuda.manual_seed(42)
-        
-        target_class = 1 - label
-        x = img.unsqueeze(0).to(self.device)
-        
-        x_cf = generate_counterfactual(
-            self.model, x, target_class,
-            steps=self.config.counterfactual_steps,
-            lam=self.config.counterfactual_lam,
-        )
-        
-        diff = (x_cf - x).abs().mean(dim=1).squeeze()
-        
-        # Does it flip the class check
-        # with torch.no_grad():
-        #     orig_prob = torch.sigmoid(self.model(x)).item()
-        #     cf_prob = torch.sigmoid(self.model(x_cf)).item()
-        #     print(f"Original: {orig_prob:.3f} → Counterfactual: {cf_prob:.3f}")
-            
-        return _normalise(diff.cpu().numpy())
-    
-        
+    Returns:
+        Tuple of (deletion_auc, insertion_auc).
+    """
+    from captum.metrics import insertion, deletion
+    model.eval()
+    model.to(device)
+
+    # Ensure batch dimension: (C, H, W) → (1, C, H, W)
+    image = image.unsqueeze(0).to(device)
+    attr_tensor = torch.tensor(attributions, dtype=torch.float32).unsqueeze(0).to(device)
+
+    # --- Normalize attributions ---
+    attr_tensor = attr_tensor.abs()
+    attr_tensor = attr_tensor / (attr_tensor.max() + 1e-8)
+
+    # --- Define forward function ---
+    def forward_func(x):
+        logits = model(x)
+        prob = torch.sigmoid(logits).squeeze(-1)
+        return prob if label == 1 else (1 - prob)
+
+    baseline = torch.zeros_like(image)
+
+    insertion_scores = insertion(
+        forward_func=forward_func,
+        inputs=image,
+        attributions=attr_tensor,
+        baselines=baseline,
+        target=None,   # already handled in forward_func
+        n_steps=steps,
+        perturbations_per_eval=10,
+    )
+
+    # --- Deletion ---
+    deletion_scores = deletion(
+        forward_func=forward_func,
+        inputs=image,
+        attributions=attr_tensor,
+        baselines=baseline,
+        target=None,
+        n_steps=steps,
+        perturbations_per_eval=10,
+    )
+
+    # --- AUC computation ---
+    def compute_auc(curve):
+        return torch.trapz(curve, dim=0)
+
+    ins_auc = compute_auc(insertion_scores[0]).item()
+    del_auc = compute_auc(deletion_scores[0]).item()
+
+    return del_auc, ins_auc
 
 
 def compute_fidelity(
@@ -408,7 +437,7 @@ def compute_fidelity(
     label: int,
     steps: int,
     device: torch.device,
-    path:str
+    path: str
 ) -> tuple[float, float]:
     """Compute Deletion AUC and Insertion AUC for one image.
 
@@ -418,13 +447,18 @@ def compute_fidelity(
     Insertion: start from a fully masked image and reveal pixels in importance
                order -> score should rise quickly. Higher AUC is better.
 
+    Pixel importance is determined by the mean absolute saliency across channels,
+    giving a single (H, W) ranking map from the full (C, H, W) attribution.
+    The mask is then applied identically to all C channels.
+
     Args:
         model: PyTorch model in eval mode.
         image: Image tensor (C, H, W).
-        saliency: Saliency map (H, W), values in [0, 1].
+        saliency: Per-channel saliency map (C, H, W) from Explainer.explain().
         label: Target class index.
         steps: Number of masking steps.
         device: Torch device.
+        path: File path to save the fidelity curve plot.
 
     Returns:
         Tuple of (deletion_auc, insertion_auc), both in [0, 1].
@@ -432,8 +466,12 @@ def compute_fidelity(
     C, H, W = image.shape
     n_pixels = H * W
 
-    # Flatten saliency and sort pixel indices from most to least important
-    flat_sal = saliency.flatten()
+    # Collapse (C, H, W) → (H, W) by taking the mean absolute value across
+    # channels.  This gives a single importance score per spatial location.
+    importance_hw = np.abs(saliency).mean(axis=0)  # (H, W)
+
+    # Flatten and rank pixels from most to least important
+    flat_sal = importance_hw.flatten()
     ranked = np.argsort(flat_sal)[::-1]  # descending importance
 
     deletion_scores = []
@@ -443,45 +481,37 @@ def compute_fidelity(
         n_masked = int(step / steps * n_pixels)
         mask = np.ones(n_pixels, dtype=np.float32)
         mask[ranked[:n_masked]] = 0.0          # deletion: blank top pixels
+        # Broadcast mask to all channels: (1, H, W)
         mask_tensor = torch.tensor(mask.reshape(1, H, W)).to(device)
 
         # --- Deletion ---
         deleted = image.to(device) * mask_tensor
         with torch.no_grad():
-            # score_del = F.softmax(model(deleted.unsqueeze(0)), dim=1)[0, label].item()   
-            prob_del = F.sigmoid(model(deleted.unsqueeze(0))) # Binary output
-            
+            prob_del = F.sigmoid(model(deleted.unsqueeze(0)))  # Binary output
             score_del = prob_del if label == 1 else 1.0 - prob_del
 
-            
         deletion_scores.append(score_del.item())
 
-        # --- Insertion: reveal top pixels on a blurred/black baseline ---
+        # --- Insertion: reveal top pixels on a black baseline ---
         inserted = image.to(device) * (1 - mask_tensor)  # only top pixels visible
         with torch.no_grad():
-            # score_ins = F.softmax(model(inserted.unsqueeze(0)), dim=1)[0, label].item()
             prob_ins = F.sigmoid(model(inserted.unsqueeze(0)))  # Binary output
-
             score_ins = prob_ins if label == 1 else 1.0 - prob_ins
 
-            
         insertion_scores.append(score_ins.item())
 
     # AUC via trapezoidal integration over evenly-spaced steps
-    
-
     xs = np.linspace(0, 1, steps + 1)
 
     del_auc = float(np.trapezoid(deletion_scores, xs))
     ins_auc = float(np.trapezoid(insertion_scores, xs))
 
     fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    
+
     ax.plot(xs, deletion_scores)
     ax.set_title("Deletion AUC")
     ax2.plot(xs, insertion_scores)
     ax2.set_title("Insertion AUC")
-
 
     fig.savefig(path)
     plt.close(fig)
@@ -501,6 +531,9 @@ def compute_stability(
     Adds Gaussian noise to the input multiple times and measures how much
     the explanation changes relative to the input change.
     Lower values indicate more stable (robust) explanations.
+
+    The Lipschitz ratio is computed over the flattened (C×H×W) attribution
+    vectors, so channel-level differences are fully captured.
 
     Args:
         explainer: Explainer instance.
@@ -537,6 +570,7 @@ def compute_identity(
     """Check if the same input always produces the same explanation.
 
     A value of 1.0 means the method is deterministic; 0.0 means it is not.
+    Comparison is element-wise over the full (C, H, W) attribution array.
 
     Args:
         explainer: Explainer instance.
@@ -569,12 +603,16 @@ def compute_separability(
     A good explainer should produce distinct explanations for distinct inputs.
     Pairs are sampled from images belonging to different classes.
 
+    The L2 distance is computed over the flattened (C×H×W) attribution vectors,
+    capturing both spatial and channel-level differences.
+
     Args:
         explainer: Explainer instance.
         images: List of image tensors.
         labels: Corresponding class labels.
         n_pairs: Number of pairs to evaluate.
-        eps: Minimum L2 distance between maps to count as "separable".
+        eps: Minimum L2 distance between flattened (C, H, W) maps to count as
+             "separable".
 
     Returns:
         Fraction of pairs that are separable (float in [0, 1]).
@@ -605,10 +643,6 @@ def compute_separability(
 
     return separable / n_pairs
 
-
-# ===========================================================================
-# VISUALISATION
-# ===========================================================================
 
 def _normalise(arr: np.ndarray) -> np.ndarray:
     """Min-max normalise an array to [0, 1].
@@ -826,9 +860,13 @@ class SaliencyVisualiser:
         Uses a hot colormap with [0, 1] range. Suitable for IntGrad, SmoothGrad,
         LIME, etc.
 
+        Accepts saliency of shape (C, H, W) or (H, W). When (C, H, W) is given,
+        the mean absolute value across channels is taken to produce a (H, W) map
+        for display.
+
         Args:
             image_tensor: Input image tensor (C, H, W).
-            saliency: Normalised saliency map (H, W), values in [0, 1].
+            saliency: Saliency map of shape (C, H, W) or (H, W).
             method_name: Method name for the plot title.
             pred_prob: Probability for the predicted class.
             true_label: Ground-truth class index.
@@ -838,6 +876,10 @@ class SaliencyVisualiser:
         img = self._to_hwc(image_tensor)
         true_name = self.idx_to_class.get(true_label, str(true_label))
         pred_name = self.idx_to_class.get(pred_label, str(pred_label))
+
+        # Collapse (C, H, W) → (H, W) by mean absolute value across channels
+        hm = np.abs(saliency).mean(axis=0) if saliency.ndim == 3 else saliency
+        hm = _normalise(hm)  # re-normalise to [0, 1] after abs+mean
 
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
