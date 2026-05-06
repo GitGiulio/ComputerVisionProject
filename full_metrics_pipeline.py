@@ -11,19 +11,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
+import os
+import torchvision
 from torchvision import transforms
-
-
-def _try_import(module_name: str, pip_name: str):
-    """Lazily import an optional dependency with a helpful error if missing."""
-    import importlib
-    try:
-        return importlib.import_module(module_name)
-    except ImportError:
-        raise ImportError(
-            f"Required package '{pip_name}' is not installed. "
-            f"Run: pip install {pip_name}"
-        )
+from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder,collate_skip_none
+from Grad_cam_visual import find_last_conv_layer
+import shap
 
 
 class ShapBinaryWrapper(torch.nn.Module):
@@ -71,7 +64,9 @@ class EvalConfig:
         device: 'cuda' or 'cpu'.
         output_dir: Folder where plots and CSV are saved.
         # Metric-specific knobs
-        fidelity_steps: Number of masking steps for deletion/insertion AUC.
+        fidelity_features_per_step: Exact number of features added (insertion) or removed (deletion) at each curve step.
+            Using a fixed count, rather than a fixed number of steps, guarantees that insertion and deletion are perfect duals with
+            identical step sizes. Total steps = ceil(C*H*W / fidelity_features_per_step).
         stability_n_perturbations: Number of noisy copies per image.
         stability_noise_std: Std of Gaussian noise added for stability test.
         separability_n_pairs: Number of cross-class image pairs to check.
@@ -87,18 +82,11 @@ class EvalConfig:
     batch_size: int = 8
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "./interpretability_results"
-    # Fidelity
-    fidelity_steps: int = 20
-    # Stability
+    fidelity_features_per_step: int = 100
     stability_n_perturbations: int = 10
     stability_noise_std: float = 0.05
-    # Separability
     separability_n_pairs: int = 30
     separability_eps: float = 1e-3
-    
-    # Counterfactual
-    counterfactual_steps: int = 200
-    counterfactual_lam: float = 0.5
     shap_background: Optional[torch.Tensor] = None
     shap_explain_probability: bool = True
 
@@ -118,7 +106,9 @@ class MetricResults:
         raw: Per-sample raw values for each metric (for plotting distributions).
     """
     deletion_auc: float = 0.0
+    deletion_auc_captum: float = 0.0
     insertion_auc: float = 0.0
+    insertion_auc_captum: float = 0.0
     stability: float = 0.0
     identity: float = 0.0
     separability: float = 0.0
@@ -212,9 +202,6 @@ class Explainer:
         self.model.zero_grad()
         out = self.model(x)
 
-        # Support both binary (scalar / single-logit) and multi-class outputs.
-        # For binary models out.shape == (1, 1) or (1,); we backprop on the
-        # single value. For multi-class we use the highest-scoring class.
         if out.numel() == 1 or out.shape[-1] == 1:
             score = out.squeeze()
         else:
@@ -285,7 +272,6 @@ class Explainer:
             symmetrically normalised by the global max absolute value across
             all channels.
         """
-        shap_lib = _try_import("shap", "shap")
 
         wrapped = ShapBinaryWrapper(
             self.model,
@@ -298,7 +284,7 @@ class Explainer:
         else:
             background = torch.zeros(1, *img.shape, device=self.device)
 
-        explainer = shap_lib.DeepExplainer(wrapped, background)
+        explainer = shap.DeepExplainer(wrapped, background)
         x = img.unsqueeze(0).to(self.device)
         shap_vals = explainer.shap_values(x)
 
@@ -317,7 +303,7 @@ class Explainer:
         # shap_arr[0] is now (C, H, W)
         chw = shap_arr[0].astype(np.float32)
 
-        # Symmetric normalisation by global max-abs so range is [-1, 1]
+        # Symmetric normalisation by global max-abs so range is [-1, 1] (whe rank based on abs were needed)
         max_abs = np.max(np.abs(chw)) + 1e-8
         return (chw / max_abs)  # (C, H, W)
 
@@ -332,7 +318,6 @@ class Explainer:
         Returns:
             Array of shape (H, W, C) with raw signed SHAP values.
         """
-        shap_lib = _try_import("shap", "shap")
         wrapped = ShapBinaryWrapper(
             self.model,
             explain_probability=self.config.shap_explain_probability
@@ -342,7 +327,7 @@ class Explainer:
                       if self.config.shap_background is not None
                       else torch.zeros(1, *img.shape, device=self.device))
 
-        explainer = shap_lib.DeepExplainer(wrapped, background)
+        explainer = shap.DeepExplainer(wrapped, background)
         x = img.unsqueeze(0).to(self.device)
         shap_vals = explainer.shap_values(x)
 
@@ -435,28 +420,28 @@ def compute_fidelity(
     image: torch.Tensor,
     saliency: np.ndarray,
     label: int,
-    steps: int,
+    features_per_step: int,
     device: torch.device,
     path: str
 ) -> tuple[float, float]:
     """Compute Deletion AUC and Insertion AUC for one image.
 
-    Deletion: progressively mask the most important pixels -> score should drop.
-              Lower AUC is better (the explanation correctly identifies key pixels).
+    Deletion: progressively replace the most important features with the baseline
+              value -> the model score for the true class should drop quickly.
+              Lower AUC is better.
 
-    Insertion: start from a fully masked image and reveal pixels in importance
-               order -> score should rise quickly. Higher AUC is better.
-
-    Pixel importance is determined by the mean absolute saliency across channels,
-    giving a single (H, W) ranking map from the full (C, H, W) attribution.
-    The mask is then applied identically to all C channels.
+    Insertion: start from the baseline and progressively reveal the most important
+               features from the real image -> score should rise quickly.
+               Higher AUC is better.
 
     Args:
-        model: PyTorch model in eval mode.
+        model: PyTorch model in eval mode, outputting a single scalar logit.
         image: Image tensor (C, H, W).
         saliency: Per-channel saliency map (C, H, W) from Explainer.explain().
-        label: Target class index.
-        steps: Number of masking steps.
+        label: Target class index (0 or 1 for binary classification).
+        features_per_step: Number of (c, h, w) features to add/remove at each
+                           step. Must be >= 1. Controls curve granularity and
+                           computation cost. Total steps = ceil(C*H*W / features_per_step).
         device: Torch device.
         path: File path to save the fidelity curve plot.
 
@@ -464,57 +449,65 @@ def compute_fidelity(
         Tuple of (deletion_auc, insertion_auc), both in [0, 1].
     """
     C, H, W = image.shape
-    n_pixels = H * W
+    n_features = C * H * W
 
-    # Collapse (C, H, W) → (H, W) by taking the mean absolute value across
-    # channels.  This gives a single importance score per spatial location.
-    importance_hw = np.abs(saliency).mean(axis=0)  # (H, W)
+    # Rank all C*H*W features globally by absolute saliency, descending.
+    flat_sal = np.abs(saliency).flatten()           # (C*H*W,)
+    ranked = np.argsort(flat_sal)[::-1].copy()      # descending importance
 
-    # Flatten and rank pixels from most to least important
-    flat_sal = importance_hw.flatten()
-    ranked = np.argsort(flat_sal)[::-1]  # descending importance
+    # Build the sequence of exact cumulative feature counts for each curve point.
+    # np.arange gives 0, features_per_step, 2*features_per_step, ...
+    # We cap at n_features so the last point always covers all features exactly.
+    thresholds = np.arange(0, n_features, features_per_step, dtype=int).tolist()
+    if thresholds[-1] != n_features:
+        thresholds.append(n_features)   # ensure we always evaluate the fully masked/revealed state
 
-    deletion_scores = []
-    insertion_scores = []
+    baseline = torch.zeros_like(image).to(device)
+    image_dev = image.to(device)
 
-    for step in range(steps + 1):
-        n_masked = int(step / steps * n_pixels)
-        mask = np.ones(n_pixels, dtype=np.float32)
-        mask[ranked[:n_masked]] = 0.0          # deletion: blank top pixels
-        # Broadcast mask to all channels: (1, H, W)
-        mask_tensor = torch.tensor(mask.reshape(1, H, W)).to(device)
+    deletion_scores: list[float] = []
+    insertion_scores: list[float] = []
 
-        # --- Deletion ---
-        deleted = image.to(device) * mask_tensor
+    def _score(tensor: torch.Tensor) -> float:
+        """Run model on a single (C,H,W) tensor and return the true-class score."""
         with torch.no_grad():
-            prob_del = F.sigmoid(model(deleted.unsqueeze(0)))  # Binary output
-            score_del = prob_del if label == 1 else 1.0 - prob_del
+            logit = model(tensor.unsqueeze(0))          # (1, 1) or (1,)
+            prob = torch.sigmoid(logit).squeeze()       # scalar
+            return prob.item() if label == 1 else (1.0 - prob).item()
 
-        deletion_scores.append(score_del.item())
+    for n_top in thresholds:
+        mask = np.ones(n_features, dtype=np.float32)
+        mask[ranked[:n_top]] = 0.0
 
-        # --- Insertion: reveal top pixels on a black baseline ---
-        inserted = image.to(device) * (1 - mask_tensor)  # only top pixels visible
-        with torch.no_grad():
-            prob_ins = F.sigmoid(model(inserted.unsqueeze(0)))  # Binary output
-            score_ins = prob_ins if label == 1 else 1.0 - prob_ins
+        mask_tensor = torch.tensor(
+            mask.reshape(C, H, W), dtype=torch.float32
+        ).to(device)                                    # (C, H, W)
 
-        insertion_scores.append(score_ins.item())
+        deleted = image_dev * mask_tensor + baseline * (1.0 - mask_tensor)
+        deletion_scores.append(_score(deleted))
 
-    # AUC via trapezoidal integration over evenly-spaced steps
-    xs = np.linspace(0, 1, steps + 1)
+        inserted = baseline + image_dev * (1.0 - mask_tensor)
+        insertion_scores.append(_score(inserted))
+
+    xs = np.array(thresholds, dtype=float) / n_features
 
     del_auc = float(np.trapezoid(deletion_scores, xs))
     ins_auc = float(np.trapezoid(insertion_scores, xs))
 
-    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-
-    ax.plot(xs, deletion_scores)
-    ax.set_title("Deletion AUC")
+    # DEBUG plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    ax1.plot(xs, deletion_scores)
+    ax1.set_xlabel("Fraction of features masked")
+    ax1.set_ylabel("Model score (true class)")
+    ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower is better)")
     ax2.plot(xs, insertion_scores)
-    ax2.set_title("Insertion AUC")
-
+    ax2.set_xlabel("Fraction of features revealed")
+    ax2.set_ylabel("Model score (true class)")
+    ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher is better)")
+    fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
+    # DEBUG plot
 
     return del_auc, ins_auc
 
@@ -887,13 +880,13 @@ class SaliencyVisualiser:
         axes[0].set_title(f"Input\nTrue: {true_name}\nPred: {pred_name} ({pred_prob:.3f})")
         axes[0].axis("off")
 
-        im = axes[1].imshow(saliency, cmap="hot", vmin=0, vmax=1)
+        im = axes[1].imshow(hm, cmap="hot", vmin=0, vmax=1)
         axes[1].set_title(f"{method_name.upper()} heatmap")
         axes[1].axis("off")
         plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
 
         axes[2].imshow(img)
-        axes[2].imshow(saliency, cmap="hot", alpha=self.overlay_alpha, vmin=0, vmax=1)
+        axes[2].imshow(hm, cmap="hot", alpha=self.overlay_alpha, vmin=0, vmax=1)
         axes[2].set_title("Overlay")
         axes[2].axis("off")
 
@@ -914,7 +907,9 @@ class SaliencyVisualiser:
 
         Args:
             images: List of image tensors (C, H, W).
-            saliency_maps: Corresponding saliency maps (H, W).
+            saliency_maps: Corresponding saliency maps of shape (C, H, W) or (H, W).
+                           (C, H, W) maps are collapsed to (H, W) by mean absolute
+                           value across channels before display.
             method_name: Label for the plot title.
             n_show: Number of pairs to display.
             filename: Output filename saved directly under out_dir.
@@ -929,7 +924,11 @@ class SaliencyVisualiser:
             if i == 0:
                 axes[0, i].set_title("Image", fontsize=9)
 
-            axes[1, i].imshow(saliency_maps[i], cmap="hot")
+            # Collapse (C, H, W) → (H, W) if needed
+            sal = saliency_maps[i]
+            hm = _normalise(np.abs(sal).mean(axis=0)) if sal.ndim == 3 else sal
+
+            axes[1, i].imshow(hm, cmap="hot")
             axes[1, i].axis("off")
             if i == 0:
                 axes[1, i].set_title("Saliency", fontsize=9)
@@ -952,7 +951,9 @@ def plot_saliency_grid(
 
     Args:
         images: List of image tensors (C, H, W).
-        saliency_maps: Corresponding saliency maps (H, W).
+        saliency_maps: Corresponding saliency maps of shape (C, H, W) or (H, W).
+                       (C, H, W) maps are collapsed to (H, W) by mean absolute
+                       value across channels before display.
         method_name: Label shown in the plot title.
         n_show: Number of image/saliency pairs to show.
         save_path: Output file path.
@@ -970,7 +971,11 @@ def plot_saliency_grid(
         if i == 0:
             axes[0, i].set_title("Image", fontsize=9)
 
-        axes[1, i].imshow(saliency_maps[i], cmap="hot")
+        # Collapse (C, H, W) → (H, W) if needed
+        sal = saliency_maps[i]
+        hm = _normalise(np.abs(sal).mean(axis=0)) if sal.ndim == 3 else sal
+
+        axes[1, i].imshow(hm, cmap="hot")
         axes[1, i].axis("off")
         if i == 0:
             axes[1, i].set_title("Saliency", fontsize=9)
@@ -1108,6 +1113,8 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "method":       method,
                 "deletion_auc": round(res.deletion_auc, 6),
                 "insertion_auc": round(res.insertion_auc, 6),
+                "deletion_auc_captum": round(res.deletion_auc_captum, 6),
+                "insertion_auc_captum": round(res.insertion_auc_captum, 6),
                 "stability":    round(res.stability, 6),
                 "identity":     round(res.identity, 6),
                 "separability": round(res.separability, 6),
@@ -1165,14 +1172,14 @@ def evaluate_method(
         config: EvalConfig with all hyperparameters.
 
     Returns:
-        Tuple of (MetricResults, list of saliency maps for visualisation).
+        Tuple of (MetricResults, list of per-channel saliency maps of shape (C, H, W)).
     """
     device = torch.device(config.device)
     model = model.to(device).eval()
 
     explainer = Explainer(method_name, model, config)
 
-    del_aucs, ins_aucs, stab_scores, id_scores, times = [], [], [], [], []
+    del_aucs, ins_aucs,del_aucs_cap, ins_aucs_cap, stab_scores, id_scores, times = [], [], [], [], [],[], []
     saliency_maps = []
 
     print(f"\n  Evaluating: {method_name.upper()} on {len(images)} samples")
@@ -1188,9 +1195,13 @@ def evaluate_method(
 
         # --- Fidelity ---
         d_auc, i_auc = compute_fidelity(model, img, sal, lbl,
-                                         config.fidelity_steps, device,f"{config.output_dir}/{method_name}/fidelity_{i}.png")
+                                         config.fidelity_features_per_step, device,f"{config.output_dir}/{method_name}/fidelity_{i}.png")
         del_aucs.append(d_auc)
         ins_aucs.append(i_auc)
+
+        d_auc_cap, i_auc_cap = get_captum_fidelity(model, img, sal, lbl,device,500)
+        del_aucs_cap.append(d_auc_cap)
+        ins_aucs_cap.append(i_auc_cap)
 
         # --- Stability ---
         stab = compute_stability(explainer, img, lbl,
@@ -1212,6 +1223,8 @@ def evaluate_method(
     results = MetricResults(
         deletion_auc  = float(np.mean(del_aucs)),
         insertion_auc = float(np.mean(ins_aucs)),
+        deletion_auc_captum  = float(np.mean(del_aucs_cap)),
+        insertion_auc_captum = float(np.mean(ins_aucs_cap)),
         stability     = float(np.mean(stab_scores)),
         identity      = float(np.mean(id_scores)),
         separability  = sep,
@@ -1219,6 +1232,8 @@ def evaluate_method(
         raw = {
             "deletion_auc":  del_aucs,
             "insertion_auc": ins_aucs,
+            "deletion_auc_captum":  del_aucs_cap,
+            "insertion_auc_captum": ins_aucs_cap,
             "stability":     stab_scores,
             "identity":      id_scores,
             "time":          times,
@@ -1410,10 +1425,7 @@ def collect_shap_background(
     return background
 
 if __name__ == "__main__":
-    import os
-    import torchvision
-    from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder,collate_skip_none
-    from Grad_cam_visual import find_last_conv_layer
+    
 
     DATA_DIR = "./DATA/Cat_dog_splitted/"
     DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
@@ -1436,24 +1448,21 @@ if __name__ == "__main__":
 
     idx_to_class = {i: name for i, name in enumerate(val_dataset.classes)}
 
-    methods_to_evaluate = ["gradcam", "shap", "counterfactuals"]
+    methods_to_evaluate = ["gradcam", "shap"]
 
     shap_background = collect_shap_background(train_dataset,100,100)
 
     config = EvalConfig(
-        #interpretability_method= "shap",
         target_layer           = target_layer,
         n_samples              = 32,           # keep low for a quick test run
         batch_size             = 32,
         device                 = "cuda" if torch.cuda.is_available() else "cpu",
         output_dir             = "./interpretability_results_dogs_k=23_32_3_4096_1",
-        fidelity_steps         = 2000,
+        fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
         stability_n_perturbations = 5,
         stability_noise_std    = 0.05,
         separability_n_pairs   = 20,
         separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
-        counterfactual_steps   = 200,
-        counterfactual_lam     = 0.5,
         shap_background           = shap_background,
         shap_explain_probability  = False,         # True = explain sigmoid probs
     )
