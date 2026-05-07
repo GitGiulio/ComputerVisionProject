@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,88 +8,128 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 import numpy as np
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler
-from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN,I_HAVE_A_THEORY, parse_hparams_from_model_path, GradCAM
+from shared_code import (
+    SafeImageFolder, collate_skip_none, data_loaders,
+    CIFAKE_CNN, I_HAVE_A_THEORY, parse_hparams_from_model_path, GradCAM,
+)
 
-DATA_DIR = "./DATA/Cat_dog_splitted/" # Cat dog
+DATA_DIR = "./DATA/Cat_dog_splitted/"
 
 BATCH_SIZE = 512
 LR = 1e-3
 EPOCHS = 30
 
+EARLY_STOP = 3
+
 torch.backends.cudnn.benchmark = True
 
-# Model hyperparameters (from paper search space)
-CONV_FILTER = None          # {16, 32, 64, 128}
-CONV_LAYER = None            # {1, 2, 3}
-DENSE_NEURON = None         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
-DENSE_LAYER = None           # {1, 2, 3}
+class EarlyStopping:
+    """Stops training when val accuracy has not improved for patience epochs.
 
-# Grad-CAM / output config
-OUT_DIR = "./ComputerVisionProject/gradcam_outputs"
-NUM_CAM_SAMPLES = 12
-IMAGE_SIZE = 224
+    Keeps a deep-copy of the best model weights so training (or interpreting) can be resumed
+    from the best checkpoint after stopping.
+
+    Args:
+        patience: Number of epochs without improvement before stopping.
+        min_delta: Minimum change in accuracy to count as an improvement.
+    """
+
+    def __init__(self, patience: int = 3, min_delta: float = 1e-4):
+        self.patience   = patience
+        self.min_delta  = min_delta
+        self.best_acc   = -1.0
+        self.best_state = None
+        self.counter    = 0
+        self.stopped    = False
+
+    def step(self, val_acc: float, model: nn.Module) -> bool:
+        """Call once per epoch. Returns True if training should stop."""
+        if val_acc > self.best_acc + self.min_delta:
+            self.best_acc   = val_acc
+            self.best_state = copy.deepcopy(model.state_dict())
+            self.counter    = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.stopped = True
+
+        return self.stopped
+
+    def restore_best(self, model: nn.Module):
+        """Load the best recorded weights back into the model."""
+        if self.best_state is not None:
+            model.load_state_dict(self.best_state)
 
 
-def train_one_epoch(epoch,train_loader,scheduler):
+def train_one_epoch(epoch, model, train_loader, criterion, optimizer, scaler, scheduler):
+    """Train for one epoch and return (avg_loss, train_accuracy)."""
     model.train()
     running_loss = 0.0
-    steps = 0
+    correct = 0
+    total   = 0
 
     loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
     for batch in loop:
-        #print(f"done batch {i}")
         if batch is None:
             continue
         images, labels, _path = batch
         images = images.to(DEVICE, non_blocking=True)
-        labels = labels.float().unsqueeze(1).to(DEVICE, non_blocking=True)
+        labels_f = labels.float().unsqueeze(1).to(DEVICE, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda")):
+        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == "cuda")):
             logits = model(images)
-            loss = criterion(logits, labels)
+            loss   = criterion(logits, labels_f)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
+
         running_loss += loss.item()
-        steps += 1
-        #loop.set_postfix(loss=(running_loss / max(steps, 1)))
 
-    avg_loss = running_loss / max(steps, 1)
-    print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {avg_loss:.4f}")
+        # Accuracy on training batch (no extra forward pass needed)
+        with torch.no_grad():
+            preds = (torch.sigmoid(logits).squeeze(1) >= 0.5).long().cpu()
+        correct += (preds == labels).sum().item()
+        total   += labels.size(0)
 
-def evaluate(model,test_loader):
+    avg_loss   = running_loss / max(total // BATCH_SIZE, 1)
+    train_acc  = correct / max(total, 1)
+    return avg_loss, train_acc
+
+
+def evaluate(model, loader, split_name: str = "Val"):
+    """Evaluate model on a DataLoader. Returns (accuracy, precision, recall, f1)."""
     model.eval()
     preds, trues = [], []
 
     with torch.no_grad():
-        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == f"cuda")):
-            for batch in test_loader:
+        with autocast(device_type=DEVICE, dtype=torch.float16, enabled=(DEVICE == "cuda")):
+            for batch in loader:
                 if batch is None:
                     continue
                 images, labels, _path = batch
                 images = images.to(DEVICE, non_blocking=True)
                 logits = model(images)
-                probs = torch.sigmoid(logits)
+                probs  = torch.sigmoid(logits)
 
                 predictions = (probs.float().cpu().numpy() > 0.5).astype(int)
                 preds.extend(predictions.flatten())
                 trues.extend(labels.numpy().flatten())
 
     if len(preds) == 0:
-        print("\n--- TEST RESULTS ---")
+        print(f"\n--- {split_name.upper()} RESULTS ---")
         print("No valid samples to evaluate.")
-        return 0, 0, 0, 0
+        return 0.0, 0.0, 0.0, 0.0
 
-    accuracy  = np.mean(np.array(preds) == np.array(trues))
+    accuracy  = float(np.mean(np.array(preds) == np.array(trues)))
     precision = precision_score(trues, preds, zero_division=0)
     recall    = recall_score(trues, preds, zero_division=0)
     f1        = f1_score(trues, preds, zero_division=0)
 
-    print("\n--- TEST RESULTS ---")
+    print(f"\n--- {split_name.upper()} RESULTS ---")
     print(f"Accuracy : {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
     print(f"Recall   : {recall:.4f}")
@@ -98,49 +139,123 @@ def evaluate(model,test_loader):
 
 if __name__ == "__main__":
 
-    KERNEL_SIZES = [5,9,23]
-    CONV_FILTERS = [32,64]          # {16, 32, 64, 128}
-    CONV_LAYERS = [3, 3]            # {1, 2, 3}
-    DENSE_NEURONS = [64,4096]         # {32, 64, 128, 256, 512, 1024, 2048, 4096}
-    DENSE_LAYERS = [1,3]           # {1, 2, 3}
-    
-    DEVICE = f"cuda" if torch.cuda.is_available() else "cpu"
+    CONV_FILTERS  = [32, 64]          # {16, 32, 64, 128}
+    CONV_LAYERS   = [3, 3]            # {1, 2, 3}
+    DENSE_NEURONS = [64, 4096]        # {32, 64, 128, 256, 512, 1024, 2048, 4096}
+    DENSE_LAYERS  = [1, 3]            # {1, 2, 3}
 
-    print(DEVICE)
-    train_loader,val_loaedr, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
+    WEIGHT_DECAYS  = [0.0, 1e-4, 1e-3]   # L2 penalty on weights (Adam weight_decay)
+    DROPOUT_RATES  = [0.0, 0.3, 0.5]     # Dropout probability before each dense layer
+
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {DEVICE}")
+
+    train_loader, val_loader, test_dataset, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
+
     for CONV_FILTER in CONV_FILTERS:
         for CONV_LAYER in CONV_LAYERS:
             for DENSE_NEURON in DENSE_NEURONS:
                 for DENSE_LAYER in DENSE_LAYERS:
-                    #KERNEL_SIZE = KERNEL_SIZES[2]
-                    try:
-                        print("---------------------------------------------------------")
-                        print(f"STARTING TRAINING with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
-                        #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-                        model = I_HAVE_A_THEORY(23,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-                        #MODEL_PATH = "/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,23]_32_3_64_1.pth"
-                        #state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-                        #model.load_state_dict(state_dict)
-                        print(model)
-                        # Use logits-safe, autocast-safe BCEWithLogitsLoss
-                        criterion = nn.BCEWithLogitsLoss()
-                        optimizer = optim.Adam(model.parameters(), lr=LR)
-                        scaler = GradScaler(enabled=(DEVICE == f"cuda"))
-                        scheduler = optim.lr_scheduler.OneCycleLR(
-                            optimizer,
-                            max_lr=1e-3,
-                            steps_per_epoch=len(train_loader),
-                            epochs=EPOCHS,
-                            pct_start=0.1,
-                            anneal_strategy='cos',
-                            final_div_factor=1000
-                        )
-                        for epoch in range(EPOCHS):
-                            train_one_epoch(epoch,train_loader,scheduler)
-                            #torch.save(obj=model.state_dict(),f=f"/home/cv04f26/ComputerVisionProject/models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
-                            torch.save(obj=model.state_dict(),f=f"./models/model_kernel=[5,9,23]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}.pth")
-                        accuracy, precision, recall, f1 = evaluate(model,val_loaedr)
-                        
-                    except Exception as e:
-                        print(f"FAILED with \n CONV_FILTERS:{CONV_FILTER}\n CONV_LAYERS:{CONV_LAYER}\n DENSE_NEURONS:{DENSE_NEURON}\n DENSE_LAYERS:{DENSE_LAYER}")
-                        print(e)
+                    for WEIGHT_DECAY in WEIGHT_DECAYS:
+                        for DROPOUT_RATE in DROPOUT_RATES:
+                            run_tag = (
+                                f"k23_cf{CONV_FILTER}_cl{CONV_LAYER}"
+                                f"_dn{DENSE_NEURON}_dl{DENSE_LAYER}"
+                                f"_wd{WEIGHT_DECAY}_do{DROPOUT_RATE}"
+                            )
+                            try:
+                                print("-" * 65)
+                                print(
+                                    f"STARTING: {run_tag}\n"
+                                    f"  kernel_size={23}\n"
+                                    f"  conv_filters={CONV_FILTER}  conv_layers={CONV_LAYER}\n"
+                                    f"  dense_neurons={DENSE_NEURON}  dense_layers={DENSE_LAYER}\n"
+                                    f"  weight_decay={WEIGHT_DECAY}  dropout={DROPOUT_RATE}"
+                                )
+
+                                model = I_HAVE_A_THEORY(
+                                    23, CONV_FILTER, CONV_LAYER,
+                                    DENSE_NEURON, DENSE_LAYER,
+                                    dropout_rate=DROPOUT_RATE,
+                                ).to(DEVICE)
+
+                                criterion = nn.BCEWithLogitsLoss()
+                                optimizer = optim.Adam(
+                                    model.parameters(),
+                                    lr=LR,
+                                    weight_decay=WEIGHT_DECAY,   # L2 regularization
+                                )
+                                scaler = GradScaler(enabled=(DEVICE == "cuda"))
+                                scheduler = optim.lr_scheduler.OneCycleLR(
+                                    optimizer,
+                                    max_lr=LR,
+                                    steps_per_epoch=len(train_loader),
+                                    epochs=EPOCHS,
+                                    pct_start=0.1,
+                                    anneal_strategy="cos",
+                                    final_div_factor=1000,
+                                )
+
+                                early_stop = EarlyStopping(patience=EARLY_STOP)
+
+                                for epoch in range(EPOCHS):
+                                    avg_loss, train_acc = train_one_epoch(
+                                        epoch, model, train_loader,
+                                        criterion, optimizer, scaler, scheduler,
+                                    )
+
+                                    val_acc, _, _, _ = evaluate(model, val_loader, split_name="Val")
+
+                                    # ── Gap diagnostic ────────────────────────
+                                    gap = train_acc - val_acc
+                                    overfit_flag = " ⚠ overfit" if gap > 0.10 else ""
+                                    print(
+                                        f"  Epoch {epoch+1:>3}/{EPOCHS} | "
+                                        f"loss={avg_loss:.4f} | "
+                                        f"train_acc={train_acc:.4f} | "
+                                        f"val_acc={val_acc:.4f} | "
+                                        f"gap={gap:+.4f}{overfit_flag}"
+                                    )
+
+                                    # ── Save checkpoint every epoch ───────────
+                                    ckpt_path = (
+                                        f"./models/model_kernel=[5,9,23]"
+                                        f"_{CONV_FILTER}_{CONV_LAYER}"
+                                        f"_{DENSE_NEURON}_{DENSE_LAYER}"
+                                        f"_wd{WEIGHT_DECAY}_do{DROPOUT_RATE}.pth"
+                                    )
+                                    torch.save(model.state_dict(), ckpt_path)
+
+                                    # ── Early stopping check ──────────────────
+                                    if early_stop.step(val_acc, model):
+                                        print(
+                                            f"  Early stopping at epoch {epoch+1} "
+                                            f"(best val_acc={early_stop.best_acc:.4f}, "
+                                            f"no improvement for {EARLY_STOP} epochs)"
+                                        )
+                                        break
+
+                                # Restore best weights, then save best checkpoint
+                                early_stop.restore_best(model)
+                                best_path = (
+                                    f"./models/best_model_kernel=[5,9,23]"
+                                    f"_{CONV_FILTER}_{CONV_LAYER}"
+                                    f"_{DENSE_NEURON}_{DENSE_LAYER}"
+                                    f"_wd{WEIGHT_DECAY}_do{DROPOUT_RATE}.pth"
+                                )
+                                torch.save(model.state_dict(), best_path)
+                                print(f"  Best checkpoint saved → {best_path}")
+
+                                # Final evaluation on val set with best weights
+                                accuracy, precision, recall, f1 = evaluate(
+                                    model, val_loader, split_name="Final Val"
+                                )
+
+                            except Exception as e:
+                                print(
+                                    f"FAILED: {run_tag}\n"
+                                    f"  conv_filters={CONV_FILTER}  conv_layers={CONV_LAYER}\n"
+                                    f"  dense_neurons={DENSE_NEURON}  dense_layers={DENSE_LAYER}\n"
+                                    f"  weight_decay={WEIGHT_DECAY}  dropout={DROPOUT_RATE}\n"
+                                    f"  Error: {e}"
+                                )

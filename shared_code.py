@@ -93,11 +93,11 @@ def collate_skip_none(batch):
     )
 
 
-def data_loaders(DEVICE,BATCH_SIZE,):
+def data_loaders(DEVICE, BATCH_SIZE):
     tensor_transform = get_tensor_transform()
     train_data = SafeImageFolder(os.path.join(DATA_DIR, "train"), transform=tensor_transform)
     val_data   = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=tensor_transform)
-    test_data   = SafeImageFolder(os.path.join(DATA_DIR, "test"),   transform=tensor_transform)
+    test_data  = SafeImageFolder(os.path.join(DATA_DIR, "test"),  transform=tensor_transform)
 
     pin_mem = DEVICE.startswith("cuda")
 
@@ -167,20 +167,46 @@ class CIFAKE_CNN(nn.Module):
 
 
 class I_HAVE_A_THEORY(nn.Module):
-    def __init__(self,kernel_size, conv_filters, conv_layers, dense_neurons, dense_layers):
+    """Multi-kernel CNN with optional dropout regularization.
+
+    The first three conv layers use kernel sizes 5, 9, and `kernel_size`
+    respectively. Dropout is applied before each dense (fully-connected) layer.
+
+    Args:
+        kernel_size: Kernel size for conv layers beyond the first two.
+        conv_filters: Number of output channels for every conv layer.
+        conv_layers: Total number of conv+pool blocks.
+        dense_neurons: Width of each hidden dense layer.
+        dense_layers: Number of hidden dense layers.
+        dropout_rate: Dropout probability applied before each dense layer.
+                      0.0 disables dropout entirely.
+    """
+
+    def __init__(
+        self,
+        kernel_size: int,
+        conv_filters: int,
+        conv_layers: int,
+        dense_neurons: int,
+        dense_layers: int,
+        dropout_rate: float = 0.0,
+    ):
         super().__init__()
 
         conv_blocks = []
         in_channels = 3
 
         for i in range(conv_layers):
-            if i==0:
-                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=5, stride=1, padding=(5-1)//2))
-            elif i==1:
-                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=9, stride=1, padding=(9-1)//2))
+            if i == 0:
+                k = 5
+            elif i == 1:
+                k = 9
             else:
-                conv_blocks.append(nn.Conv2d(in_channels, conv_filters, kernel_size=kernel_size, stride=1, padding=(kernel_size-1)//2))
-
+                k = kernel_size
+            conv_blocks.append(
+                nn.Conv2d(in_channels, conv_filters, kernel_size=k,
+                          stride=1, padding=(k - 1) // 2)
+            )
             conv_blocks.append(nn.ReLU())
             conv_blocks.append(nn.MaxPool2d(kernel_size=2, stride=2))
             in_channels = conv_filters
@@ -194,21 +220,24 @@ class I_HAVE_A_THEORY(nn.Module):
         in_features = flattened_size
 
         for _ in range(dense_layers):
+            if dropout_rate > 0.0:
+                dense_blocks.append(nn.Dropout(p=dropout_rate))
             dense_blocks.append(nn.Linear(in_features, dense_neurons))
             dense_blocks.append(nn.ReLU())
             in_features = dense_neurons
 
-        dense_blocks.append(nn.Linear(in_features, 1))  # binary logit
+        dense_blocks.append(nn.Linear(in_features, 1))
         self.fc_logits = nn.Sequential(*dense_blocks)
 
     def forward(self, x):
         x = self.conv(x)
         x = torch.flatten(x, 1)
         logit = self.fc_logits(x)
-        return logit  # (B,1) logits
+        return logit  # (B, 1) logits
 
     def forward_logits(self, x):
         return self.forward(x)
+
 
 def parse_hparams_from_model_path(model_path):
     """
@@ -245,7 +274,6 @@ class GradCAM:
             self.gradients = grad_output[0].detach()
 
         self.fwd_handle = self.target_layer.register_forward_hook(forward_hook)
-
         self.bwd_handle = self.target_layer.register_full_backward_hook(full_backward_hook)
 
     def remove_hooks(self):
@@ -264,25 +292,25 @@ class GradCAM:
     def generate(self, input_tensor: torch.Tensor, use_logits: bool = True):
         self.model.zero_grad()
         if use_logits and hasattr(self.model, "forward_logits"):
-            output = self.model.forward_logits(input_tensor)     # (B,1) logits
+            output = self.model.forward_logits(input_tensor)
             target = output.squeeze(1)
         else:
-            output = self.model(input_tensor)                    # (B,1) logits
+            output = self.model(input_tensor)
             target = output.squeeze(1)
         target.sum().backward()
-        grads = self.gradients            # (B, C, H, W)
-        activs = self.activations         # (B, C, H, W)
-        weights = grads.mean(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
-        cam = (weights * activs).sum(dim=1)            # (B, H, W)
+        grads  = self.gradients
+        activs = self.activations
+        weights = grads.mean(dim=(2, 3), keepdim=True)
+        cam = (weights * activs).sum(dim=1)
         cam = torch.relu(cam)
         cam = self._normalize_cam(cam)
         cam = cam.unsqueeze(1)
-        cam = F.interpolate(cam, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False).squeeze(1)
-        return cam  # (B,IMAGE_SIZE,IMAGE_SIZE) in [0,1]
-    
+        cam = F.interpolate(cam, size=(IMAGE_SIZE, IMAGE_SIZE),
+                            mode="bilinear", align_corners=False).squeeze(1)
+        return cam  # (B, IMAGE_SIZE, IMAGE_SIZE) in [0, 1]
 
 
-def evaluate(model,test_loader,DEVICE):
+def evaluate(model, test_loader, DEVICE):
     model.eval()
     preds, trues = [], []
 
@@ -294,7 +322,7 @@ def evaluate(model,test_loader,DEVICE):
                 images, labels, _path = batch
                 images = images.to(DEVICE, non_blocking=True)
                 logits = model(images)
-                probs = torch.sigmoid(logits)
+                probs  = torch.sigmoid(logits)
 
                 predictions = (probs.float().cpu().numpy() > 0.5).astype(int)
                 preds.extend(predictions.flatten())
