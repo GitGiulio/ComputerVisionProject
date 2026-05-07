@@ -16,6 +16,7 @@ import torchvision
 from torchvision import transforms
 from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder,collate_skip_none
 from Grad_cam_visual import find_last_conv_layer
+from captum.metrics import infidelity
 import shap
 
 
@@ -106,9 +107,7 @@ class MetricResults:
         raw: Per-sample raw values for each metric (for plotting distributions).
     """
     deletion_auc: float = 0.0
-    deletion_auc_captum: float = 0.0
     insertion_auc: float = 0.0
-    insertion_auc_captum: float = 0.0
     stability: float = 0.0
     identity: float = 0.0
     separability: float = 0.0
@@ -341,80 +340,6 @@ class Explainer:
             arr = np.transpose(arr, (0, 2, 3, 1))
         return arr[0]  # (H, W, C)
 
-        
-def get_captum_fidelity(
-    model: torch.nn.Module,
-    image: torch.Tensor,
-    attributions: np.ndarray,
-    label: int,
-    device: torch.device,
-    steps: int = 50
-) -> tuple[float, float]:
-    """Compute insertion and deletion AUC using Captum.
-
-    Args:
-        model: PyTorch model in eval mode.
-        image: Image tensor (C, H, W).
-        attributions: Per-channel saliency map (C, H, W) from Explainer.explain().
-                      Must match the spatial and channel dimensions of ``image``.
-        label: Ground-truth class index (0 or 1 for binary).
-        device: Torch device.
-        steps: Number of perturbation steps for the AUC curves.
-
-    Returns:
-        Tuple of (deletion_auc, insertion_auc).
-    """
-    from captum.metrics import insertion, deletion
-    model.eval()
-    model.to(device)
-
-    # Ensure batch dimension: (C, H, W) → (1, C, H, W)
-    image = image.unsqueeze(0).to(device)
-    attr_tensor = torch.tensor(attributions, dtype=torch.float32).unsqueeze(0).to(device)
-
-    # --- Normalize attributions ---
-    attr_tensor = attr_tensor.abs()
-    attr_tensor = attr_tensor / (attr_tensor.max() + 1e-8)
-
-    # --- Define forward function ---
-    def forward_func(x):
-        logits = model(x)
-        prob = torch.sigmoid(logits).squeeze(-1)
-        return prob if label == 1 else (1 - prob)
-
-    baseline = torch.zeros_like(image)
-
-    insertion_scores = insertion(
-        forward_func=forward_func,
-        inputs=image,
-        attributions=attr_tensor,
-        baselines=baseline,
-        target=None,   # already handled in forward_func
-        n_steps=steps,
-        perturbations_per_eval=10,
-    )
-
-    # --- Deletion ---
-    deletion_scores = deletion(
-        forward_func=forward_func,
-        inputs=image,
-        attributions=attr_tensor,
-        baselines=baseline,
-        target=None,
-        n_steps=steps,
-        perturbations_per_eval=10,
-    )
-
-    # --- AUC computation ---
-    def compute_auc(curve):
-        return torch.trapz(curve, dim=0)
-
-    ins_auc = compute_auc(insertion_scores[0]).item()
-    del_auc = compute_auc(deletion_scores[0]).item()
-
-    return del_auc, ins_auc
-
-
 def compute_fidelity(
     model: torch.nn.Module,
     image: torch.Tensor,
@@ -473,7 +398,7 @@ def compute_fidelity(
         with torch.no_grad():
             logit = model(tensor.unsqueeze(0))          # (1, 1) or (1,)
             prob = torch.sigmoid(logit).squeeze()       # scalar
-            return prob.item() if label == 1 else (1.0 - prob).item()
+            return prob.item() if label == 1 else (1.0 - prob.item())
 
     for n_top in thresholds:
         mask = np.ones(n_features, dtype=np.float32)
@@ -495,18 +420,18 @@ def compute_fidelity(
     ins_auc = float(np.trapezoid(insertion_scores, xs))
 
     # DEBUG plot
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    ax1.plot(xs, deletion_scores)
-    ax1.set_xlabel("Fraction of features masked")
-    ax1.set_ylabel("Model score (true class)")
-    ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower is better)")
-    ax2.plot(xs, insertion_scores)
-    ax2.set_xlabel("Fraction of features revealed")
-    ax2.set_ylabel("Model score (true class)")
-    ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher is better)")
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+    #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    #ax1.plot(xs, deletion_scores)
+    #ax1.set_xlabel("Fraction of features masked")
+    #ax1.set_ylabel("Model score (true class)")
+    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower is better)")
+    #ax2.plot(xs, insertion_scores)
+    #ax2.set_xlabel("Fraction of features revealed")
+    #ax2.set_ylabel("Model score (true class)")
+    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher is better)")
+    #fig.tight_layout()
+    #fig.savefig(path)
+    #plt.close(fig)
     # DEBUG plot
 
     return del_auc, ins_auc
@@ -1113,8 +1038,6 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "method":       method,
                 "deletion_auc": round(res.deletion_auc, 6),
                 "insertion_auc": round(res.insertion_auc, 6),
-                "deletion_auc_captum": round(res.deletion_auc_captum, 6),
-                "insertion_auc_captum": round(res.insertion_auc_captum, 6),
                 "stability":    round(res.stability, 6),
                 "identity":     round(res.identity, 6),
                 "separability": round(res.separability, 6),
@@ -1179,7 +1102,7 @@ def evaluate_method(
 
     explainer = Explainer(method_name, model, config)
 
-    del_aucs, ins_aucs,del_aucs_cap, ins_aucs_cap, stab_scores, id_scores, times = [], [], [], [], [],[], []
+    del_aucs, ins_aucs, del_aucs_cap, stab_scores, id_scores, times = [], [], [], [], [], []
     saliency_maps = []
 
     print(f"\n  Evaluating: {method_name.upper()} on {len(images)} samples")
@@ -1199,9 +1122,8 @@ def evaluate_method(
         del_aucs.append(d_auc)
         ins_aucs.append(i_auc)
 
-        d_auc_cap, i_auc_cap = get_captum_fidelity(model, img, sal, lbl,device,500)
-        del_aucs_cap.append(d_auc_cap)
-        ins_aucs_cap.append(i_auc_cap)
+        #d_auc_cap, i_auc_cap = get_captum_fidelity(model, img, sal, lbl,device,500)
+        #del_aucs_cap.append(d_auc_cap)
 
         # --- Stability ---
         stab = compute_stability(explainer, img, lbl,
@@ -1223,8 +1145,6 @@ def evaluate_method(
     results = MetricResults(
         deletion_auc  = float(np.mean(del_aucs)),
         insertion_auc = float(np.mean(ins_aucs)),
-        deletion_auc_captum  = float(np.mean(del_aucs_cap)),
-        insertion_auc_captum = float(np.mean(ins_aucs_cap)),
         stability     = float(np.mean(stab_scores)),
         identity      = float(np.mean(id_scores)),
         separability  = sep,
@@ -1232,8 +1152,6 @@ def evaluate_method(
         raw = {
             "deletion_auc":  del_aucs,
             "insertion_auc": ins_aucs,
-            "deletion_auc_captum":  del_aucs_cap,
-            "insertion_auc_captum": ins_aucs_cap,
             "stability":     stab_scores,
             "identity":      id_scores,
             "time":          times,
@@ -1430,11 +1348,11 @@ if __name__ == "__main__":
     DATA_DIR = "./DATA/Cat_dog_splitted/"
     DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
     BATCH_SIZE = 100
-    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 3,32,3,4096,1
+    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT = 15,32,2,64,1,0.0
 
     #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-    model = I_HAVE_A_THEORY(23,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-    MODEL_PATH = "./models/model_kernel=[5,9,23]_32_3_4096_1.pth"
+    model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT).to(DEVICE)
+    MODEL_PATH = "models/model_kernel=[5,9,15]_32_2_64_1_wd0.001_do0.0.pth"
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict) 
     model.eval()
@@ -1450,14 +1368,14 @@ if __name__ == "__main__":
 
     methods_to_evaluate = ["gradcam", "shap"]
 
-    shap_background = collect_shap_background(train_dataset,100,100)
+    shap_background = collect_shap_background(train_dataset,50,25)
 
     config = EvalConfig(
         target_layer           = target_layer,
         n_samples              = 32,           # keep low for a quick test run
         batch_size             = 32,
         device                 = "cuda" if torch.cuda.is_available() else "cpu",
-        output_dir             = "./interpretability_results_dogs_k=23_32_3_4096_1",
+        output_dir             = "./interpretability_results_dogs_k=[5,9,15]_32_2_64_1_wd0.001_do0.0",
         fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
         stability_n_perturbations = 5,
         stability_noise_std    = 0.05,
