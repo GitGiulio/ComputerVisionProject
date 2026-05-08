@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from datetime import datetime
 from torch.amp import autocast, GradScaler
 
-from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN, parse_hparams_from_model_path, GradCAM, I_HAVE_A_THEORY, evaluate
+from shared_code import SafeImageFolder, collate_skip_none, data_loaders, CIFAKE_CNN, parse_hparams_from_model_path, GradCAM, I_HAVE_A_THEORY, evaluate_2
 
 
 torch.backends.cudnn.benchmark = True
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
-    evaluate(model,val_loader,DEVICE)
+    evaluate_2(model,val_loader,DEVICE)
 
 
     generate_gradcam_samples(model,val_loader,idx_to_class,NUM_CAM_SAMPLES)

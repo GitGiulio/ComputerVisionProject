@@ -123,8 +123,19 @@ def data_loaders(DEVICE, BATCH_SIZE):
         collate_fn=collate_skip_none
     )
 
+    test_loader = DataLoader(
+        test_data,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=12,
+        persistent_workers=True,
+        prefetch_factor=8,
+        pin_memory=pin_mem,
+        collate_fn=collate_skip_none
+    )
+
     idx_to_class = {v: k for k, v in train_data.class_to_idx.items()}
-    return train_loader, val_loader, test_data, idx_to_class
+    return train_loader, val_loader, test_loader, idx_to_class
 
 
 class CIFAKE_CNN(nn.Module):
@@ -310,7 +321,7 @@ class GradCAM:
         return cam  # (B, IMAGE_SIZE, IMAGE_SIZE) in [0, 1]
 
 
-def evaluate(model, test_loader, DEVICE):
+def evaluate_2(model, test_loader, DEVICE):
     model.eval()
     preds, trues = [], []
 

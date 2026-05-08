@@ -102,6 +102,7 @@ def train_one_epoch(epoch, model, train_loader, criterion, optimizer, scaler, sc
 
 def evaluate(model, loader, split_name: str = "Val"):
     """Evaluate model on a DataLoader. Returns (accuracy, precision, recall, f1)."""
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     model.eval()
     preds, trues = [], []
 
@@ -140,7 +141,7 @@ def evaluate(model, loader, split_name: str = "Val"):
 if __name__ == "__main__":
 
     CONV_FILTERS  = [32, 64, 128]          # {16, 32, 64, 128}
-    CONV_LAYERS   = [2, 3]            # {1, 2, 3}
+    CONV_LAYERS   = [3]            # {1, 2, 3}
     DENSE_NEURONS = [64,128,512,4096]        # {32, 64, 128, 256, 512, 1024, 2048, 4096}
     DENSE_LAYERS  = [1, 2, 3]            # {1, 2, 3}
     KERNEL_SIZES  = [11, 15, 19]            # {1, 2, 3}
@@ -153,7 +154,7 @@ if __name__ == "__main__":
 
     train_loader, val_loader, test_dataset, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
 
-    already_done = 8 # counter to skip the models that I already trained
+    #already_done = 8 # counter to skip the models that I already trained
 
     for CONV_FILTER in CONV_FILTERS:
         for CONV_LAYER in CONV_LAYERS:
@@ -162,9 +163,9 @@ if __name__ == "__main__":
                     for WEIGHT_DECAY in WEIGHT_DECAYS:
                         for DROPOUT_RATE in DROPOUT_RATES:
                             for KERNEL_SIZE in KERNEL_SIZES:
-                                if already_done > 0:
-                                    already_done -= 1
-                                    break
+                                #if already_done > 0:
+                                #    already_done -= 1
+                                #    break
                                 run_tag = (
                                     f"k[5,9,{KERNEL_SIZE}]_cf{CONV_FILTER}_cl{CONV_LAYER}"
                                     f"_dn{DENSE_NEURON}_dl{DENSE_LAYER}"

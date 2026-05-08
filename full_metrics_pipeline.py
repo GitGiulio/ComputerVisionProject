@@ -15,6 +15,7 @@ import os
 import torchvision
 from torchvision import transforms
 from shared_code import CIFAKE_CNN,I_HAVE_A_THEORY, data_loaders,get_tensor_transform,SafeImageFolder,collate_skip_none
+from train import evaluate
 from Grad_cam_visual import find_last_conv_layer
 from captum.metrics import infidelity
 import shap
@@ -106,6 +107,11 @@ class MetricResults:
         avg_time_sec: Mean wall-clock seconds per explanation.
         raw: Per-sample raw values for each metric (for plotting distributions).
     """
+    model_tot_param: int = 0
+    model_val_acc: float = 0.0
+    model_val_f1: float = 0.0
+    model_test_acc: float = 0.0
+    model_test_f1: float = 0.0
     deletion_auc: float = 0.0
     insertion_auc: float = 0.0
     stability: float = 0.0
@@ -113,7 +119,6 @@ class MetricResults:
     separability: float = 0.0
     avg_time_sec: float = 0.0
     raw: dict = field(default_factory=dict)
-
 
 
 class Explainer:
@@ -1029,7 +1034,8 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
     """
     import csv
     fields = ["method", "deletion_auc", "insertion_auc", "stability",
-              "identity", "separability", "avg_time_sec"]
+              "identity", "separability", "avg_time_sec","model_tot_param"
+              ,"model_val_acc","model_val_f1","model_test_acc","model_test_f1"]
     with open(save_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -1042,6 +1048,11 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "identity":     round(res.identity, 6),
                 "separability": round(res.separability, 6),
                 "avg_time_sec": round(res.avg_time_sec, 6),
+                "model_tot_param": res.model_tot_param,
+                "model_val_acc": round(res.model_val_acc, 6),
+                "model_val_f1": round(res.model_val_f1, 6),
+                "model_test_acc": round(res.model_test_acc, 6),
+                "model_test_f1": round(res.model_test_f1, 6),
             })
     print(f"  Saved: {save_path}")
 
@@ -1194,6 +1205,7 @@ def run_pipeline(
     print(f"  Methods: {', '.join(m.upper() for m in methods)}")
     print(f"{'='*60}")
 
+
     images, labels = load_samples(dataset, config.n_samples, config.batch_size)
     all_results: dict[str, MetricResults] = {}
     all_saliency: dict[str, list[np.ndarray]] = {}
@@ -1204,6 +1216,15 @@ def run_pipeline(
 
     all_results: dict[str, MetricResults] = {}
 
+    model_total_param = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"model_total_param: {model_total_param}")
+    _, val_loader, test_loader, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
+
+    val_acc,_,_,val_f1 = evaluate(model,val_loader,"Val")
+    test_acc,_,_,test_f1 = evaluate(model,test_loader,"Test")
+
+
     for method in methods:
         
         method_dir = os.path.join(config.output_dir, method)
@@ -1212,6 +1233,14 @@ def run_pipeline(
         results, sal_maps = evaluate_method(method, model, images, labels, config)
         all_results[method] = results
 
+        all_results[method].model_tot_param = model_total_param
+        all_results[method].model_val_acc = val_acc
+        all_results[method].model_val_f1 = val_f1
+        all_results[method].model_test_acc = test_acc
+        all_results[method].model_test_f1 = test_f1
+
+        #[VISUALIZATION]
+        """
         # Build per-method visualiser, rooted under a method sub-folder
         method_dir = os.path.join(config.output_dir, method)
         vis = SaliencyVisualiser(out_dir=method_dir, idx_to_class=idx_to_class)
@@ -1253,6 +1282,7 @@ def run_pipeline(
         # Compact grid overview for this method
         vis.save_grid(images, sal_maps, method,
                       filename=f"grid_{method}.png")
+        """
 
     # Aggregate comparison plots — only meaningful with >1 method
     if len(all_results) > 1:
@@ -1272,7 +1302,6 @@ def collect_shap_background(
     batch_size: int = 8,
 ) -> torch.Tensor:
     """Collect a class-balanced background tensor for shap.DeepExplainer.
-
     Samples exactly n_background // 2 images from each class (class 0 and
     class 1), giving a balanced reference distribution. This is important
     because a skewed background biases SHAP attributions toward the
@@ -1343,46 +1372,52 @@ def collect_shap_background(
     return background
 
 if __name__ == "__main__":
-    
-
     DATA_DIR = "./DATA/Cat_dog_splitted/"
     DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
     BATCH_SIZE = 100
-    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT = 15,32,2,64,1,0.0
-
-    #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-    model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT).to(DEVICE)
-    MODEL_PATH = "models/model_kernel=[5,9,15]_32_2_64_1_wd0.001_do0.0.pth"
-    state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-    model.load_state_dict(state_dict) 
-    model.eval()
-
-    target_layer = find_last_conv_layer(model)
-
     #train_loader, val_dataset, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     train_dataset = SafeImageFolder(os.path.join(DATA_DIR, "train"),   transform=get_tensor_transform())
-    val_dataset = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=get_tensor_transform())
+    #val_dataset = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=get_tensor_transform())
     test_dataset = SafeImageFolder(os.path.join(DATA_DIR, "test"),   transform=get_tensor_transform())
 
-    idx_to_class = {i: name for i, name in enumerate(val_dataset.classes)}
+    idx_to_class = {i: name for i, name in enumerate(test_dataset.classes)}
 
     methods_to_evaluate = ["gradcam", "shap"]
 
     shap_background = collect_shap_background(train_dataset,50,25)
+    CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT = 32,3,64,1,0.0
 
-    config = EvalConfig(
-        target_layer           = target_layer,
-        n_samples              = 32,           # keep low for a quick test run
-        batch_size             = 32,
-        device                 = "cuda" if torch.cuda.is_available() else "cpu",
-        output_dir             = "./interpretability_results_dogs_k=[5,9,15]_32_2_64_1_wd0.001_do0.0",
-        fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
-        stability_n_perturbations = 5,
-        stability_noise_std    = 0.05,
-        separability_n_pairs   = 20,
-        separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
-        shap_background           = shap_background,
-        shap_explain_probability  = False,         # True = explain sigmoid probs
-    )
+    KERNEL_SIZES  = [11, 15, 19]  
 
-    results = run_pipeline(model, val_dataset, methods_to_evaluate, config)
+    WEIGHT_DECAYS  = [0.0, 1e-4, 1e-3]
+    
+    for KERNEL_SIZE in KERNEL_SIZES:
+        for WEIGHT_DECAY in WEIGHT_DECAYS:
+
+
+            #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
+            model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT).to(DEVICE)
+            MODEL_PATH = f"models/model_kernel=[5,9,{KERNEL_SIZE}]_32_3_64_1_wd{WEIGHT_DECAY}_do0.0.pth"
+            print(MODEL_PATH)
+            state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
+            model.load_state_dict(state_dict) 
+            model.eval()
+
+            target_layer = find_last_conv_layer(model)
+
+            config = EvalConfig(
+                target_layer           = target_layer,
+                n_samples              = 32,           # keep low for a quick test run
+                batch_size             = 32,
+                device                 = "cuda" if torch.cuda.is_available() else "cpu",
+                output_dir             = f"./interpretability_results_dogs_k=[5,9,{KERNEL_SIZE}]_32_3_64_1_wd{WEIGHT_DECAY}_do0.0",
+                fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
+                stability_n_perturbations = 5,
+                stability_noise_std    = 0.05,
+                separability_n_pairs   = 20,
+                separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
+                shap_background           = shap_background,
+                shap_explain_probability  = False,         # True = explain sigmoid probs
+            )
+
+            results = run_pipeline(model, test_dataset, methods_to_evaluate, config)
