@@ -1397,7 +1397,7 @@ if __name__ == "__main__":
 
             #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
             model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT).to(DEVICE)
-            MODEL_PATH = f"models/model_kernel=[5,9,{KERNEL_SIZE}]_32_3_64_1_wd{WEIGHT_DECAY}_do0.0.pth"
+            MODEL_PATH = f"models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}_wd{WEIGHT_DECAY}_do0.0"
             print(MODEL_PATH)
             state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
             model.load_state_dict(state_dict) 
@@ -1410,7 +1410,7 @@ if __name__ == "__main__":
                 n_samples              = 32,           # keep low for a quick test run
                 batch_size             = 32,
                 device                 = "cuda" if torch.cuda.is_available() else "cpu",
-                output_dir             = f"./interpretability_results_dogs_k=[5,9,{KERNEL_SIZE}]_32_3_64_1_wd{WEIGHT_DECAY}_do0.0",
+                output_dir             = f"./interpretability_results_dogs_k=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}_wd{WEIGHT_DECAY}_do0.0",
                 fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
                 stability_n_perturbations = 5,
                 stability_noise_std    = 0.05,
