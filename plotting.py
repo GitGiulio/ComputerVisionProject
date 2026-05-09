@@ -41,7 +41,7 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
             ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-            ("Stability",     "stability",      "#7cf7a0"),
+           # ("Stability",     "stability",      "#7cf7a0"),
             ("Test Accuracy", "model_test_acc", "#f7e07c"),
         ],
     },
@@ -52,7 +52,7 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
             ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-            ("Stability",     "stability",      "#7cf7a0"),
+           # ("Stability",     "stability",      "#7cf7a0"),
             ("Test Accuracy", "model_test_acc", "#f7e07c"),
         ],
     },
@@ -63,7 +63,7 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
             ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-            ("Stability",     "stability",      "#7cf7a0"),
+         #   ("Stability",     "stability",      "#7cf7a0"),
             ("Test Accuracy", "model_test_acc", "#f7e07c"),
         ],
     },
@@ -74,7 +74,7 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
             ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-            ("Stability",     "stability",      "#7cf7a0"),
+         #   ("Stability",     "stability",      "#7cf7a0"),
             ("Test Accuracy", "model_test_acc", "#f7e07c"),
         ],
     },
@@ -107,8 +107,6 @@ STYLE = {
 ACCENT_COLOR  = "#7c9ef7"
 ACCENT2_COLOR = "#f7a07c"
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def parse_folder_name(folder_name: str) -> dict | None:
     base = os.path.basename(folder_name.rstrip("/\\"))
@@ -164,10 +162,10 @@ def make_x_labels(sorted_folders: list[str], params_map: dict) -> list[str]:
     for f in sorted_folders:
         p = params_map[f]
         labels.append(
-            f"ks{p['kernel_size']}\n"
+            f"k{p['kernel_size']}\n"
             f"cf{p['conv_filter']} cl{p['conv_layer']}\n"
             f"dn{p['dense_neuron']} dl{p['dense_layer']}\n"
-            f"wd{p['weight_decay']} do{p['dropout']}"
+            f"wd{p['weight_decay']}"
         )
     return labels
 
@@ -192,8 +190,6 @@ def sort_folders_by_accuracy(df: pd.DataFrame) -> list[str]:
     return ref["folder"].tolist()
 
 
-# ── Secondary axes helpers ────────────────────────────────────────────────────
-
 def _add_param_axis(ax, df, sorted_folders, x):
     ax2 = ax.twiny()
     ax2.set_xlim(ax.get_xlim())
@@ -202,9 +198,9 @@ def _add_param_axis(ax, df, sorted_folders, x):
     labels = []
     for f in sorted_folders:
         p = ref.loc[f, "model_tot_param"] if f in ref.index else np.nan
-        labels.append(f"{int(p):,}" if not np.isnan(p) else "?")
+        labels.append(f"{int(p)/1000000:.2f}M" if not np.isnan(p) else "?")
     ax2.set_xticklabels(labels, fontsize=6.5, color="#7090c0")
-    ax2.set_xlabel("Total parameters →", fontsize=8, color="#7090c0", labelpad=4)
+    ax2.set_xlabel("Total parameters ->", fontsize=8, color="#7090c0", labelpad=4)
     ax2.tick_params(axis="x", colors="#7090c0")
     for spine in ax2.spines.values():
         spine.set_visible(False)
@@ -219,9 +215,9 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
     labels = []
     for f in sorted_folders:
         a = ref.loc[f, "model_test_acc"] if f in ref.index else np.nan
-        labels.append(f"{a:.4f}" if not np.isnan(a) else "?")
+        labels.append(f".{(a*1000):.0f}" if not np.isnan(a) else "?")
     ax2.set_xticklabels(labels, fontsize=6.5, color="#90c070")
-    ax2.set_xlabel("Test accuracy →", fontsize=8, color="#90c070", labelpad=4)
+    ax2.set_xlabel("Test accuracy ->", fontsize=8, color="#90c070", labelpad=4)
     ax2.tick_params(axis="x", colors="#90c070")
     for spine in ax2.spines.values():
         spine.set_visible(False)
@@ -257,7 +253,7 @@ def plot_metric(
     y_max = max(valid) if valid else 1.0
 
     with plt.rc_context(STYLE):
-        fig, ax = plt.subplots(figsize=(max(10, len(sorted_folders) * 1.4), 5.5))
+        fig, ax = plt.subplots(figsize=(max(10, len(sorted_folders) * 1.0), 8))
 
         ax.plot(x, y_vals, color=ACCENT_COLOR, linewidth=2,
                 marker="o", markersize=6, zorder=3)
@@ -324,7 +320,7 @@ def plot_summary_grid(df, sorted_folders, x_labels, output_dir, suffix="by_param
     with plt.rc_context(STYLE):
         fig, axes = plt.subplots(
             rows, cols,
-            figsize=(cols * max(8, len(sorted_folders) * 0.9), rows * 4.5)
+            figsize=(cols * max(8, len(sorted_folders) * 1.0), rows * 4.5)
         )
         axes = axes.flatten()
         x = np.arange(len(sorted_folders))
@@ -396,7 +392,7 @@ def plot_multi_metric_line(
     x = np.arange(len(sorted_folders))
 
     with plt.rc_context(STYLE):
-        fig, ax = plt.subplots(figsize=(max(12, len(sorted_folders) * 1.6), 6))
+        fig, ax = plt.subplots(figsize=(max(12, len(sorted_folders) * 1.0), 8))
 
         for label, column, color in metrics:
             source = model_sub if column == "model_test_acc" else method_sub
@@ -490,13 +486,12 @@ def main():
     x_labels_params    = make_x_labels(sorted_by_params,   params_map)
     x_labels_acc       = make_x_labels(sorted_by_accuracy, params_map)
 
-    print("\nGenerating single-metric line plots (both orderings) ...")
-    plot_all(df, sorted_by_params, sorted_by_accuracy,
-             x_labels_params, x_labels_acc, args.output_dir)
+    #print("\nGenerating single-metric line plots (both orderings) ...")
+    #plot_all(df, sorted_by_params, sorted_by_accuracy,x_labels_params, x_labels_acc, args.output_dir)
 
-    print("\nGenerating summary grids ...")
-    plot_summary_grid(df, sorted_by_params,   x_labels_params, args.output_dir, suffix="by_params")
-    plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, suffix="by_accuracy")
+    #print("\nGenerating summary grids ...")
+    #plot_summary_grid(df, sorted_by_params,   x_labels_params, args.output_dir, suffix="by_params")
+    #plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, suffix="by_accuracy")
 
     print("\nGenerating multi-metric line plots ...")
     plot_all_line_plots(df, sorted_by_params, sorted_by_accuracy,

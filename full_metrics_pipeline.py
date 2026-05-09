@@ -19,6 +19,7 @@ from train import evaluate
 from Grad_cam_visual import find_last_conv_layer
 from captum.metrics import infidelity
 import shap
+import re
 
 
 class ShapBinaryWrapper(torch.nn.Module):
@@ -345,12 +346,87 @@ class Explainer:
             arr = np.transpose(arr, (0, 2, 3, 1))
         return arr[0]  # (H, W, C)
 
+def _fidelity_curve(
+    model: torch.nn.Module,
+    image: torch.Tensor,
+    ranked: np.ndarray,
+    label: int,
+    steps: int,
+    device: torch.device,
+    mode: str,          # "insertion" or "deletion"
+) -> torch.Tensor:
+    """Core pixel-masking loop shared by insertion and deletion AUC.
+ 
+    Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
+    of class scores, one per masking step.
+ 
+    For *insertion*: starts from an all-zero image and progressively reveals
+    the most important pixels.  Score should rise quickly → high AUC is good.
+ 
+    For *deletion*: starts from the full image and progressively removes the
+    most important pixels.  Score should fall quickly → low AUC is good.
+ 
+    Args:
+        model:   PyTorch model already on `device`, will be put in eval mode.
+        image:   Single image tensor (C, H, W) on `device`.
+        ranked:  1-D int array of pixel indices sorted most-to-least important,
+                 length H*W.  Comes from argsort(saliency.flatten())[::-1].
+        label:   Ground-truth class index (0 or 1).
+        steps:   Number of masking steps (curve resolution).
+        device:  Torch device.
+        mode:    "insertion" or "deletion".
+ 
+    Returns:
+        1-D float tensor of shape (steps+1,) with values in [0, 1].
+    """
+    assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
+
+    C, H, W = image.shape
+    n_features = C * H * W
+
+    # Guard: saliency must have been computed for the same spatial size
+    if len(ranked) != n_features:
+        raise ValueError(
+            f"ranked has {len(ranked)} entries but image has {n_features} pixels "
+            f"({H}x{W}). Saliency map spatial size must match the image."
+        )
+
+    ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
+
+    # Safety clamp: catches any remaining off-by-one issues
+    ranked_t = ranked_t.clamp(0, n_features - 1)
+
+    scores = []
+    model.eval()
+    with torch.no_grad():
+        for step in range(steps + 1):
+            n_top = int(step / steps * n_features)
+
+            if mode == "insertion":
+                mask = torch.zeros(n_features, device=device)
+                if n_top > 0:
+                    mask[ranked_t[:n_top]] = 1.0
+            else:  # deletion
+                mask = torch.ones(n_features, device=device)
+                if n_top > 0:
+                    mask[ranked_t[:n_top]] = 0.0
+
+            mask   = mask.view(C, H, W)
+            masked = image * mask
+
+            logit = model(masked.unsqueeze(0))
+            prob  = torch.sigmoid(logit).squeeze()
+            score = prob if label == 1 else (1.0 - prob)
+            scores.append(score)
+
+    return torch.stack(scores)
+
 def compute_fidelity(
     model: torch.nn.Module,
     image: torch.Tensor,
     saliency: np.ndarray,
     label: int,
-    features_per_step: int,
+    steps: int,
     device: torch.device,
     path: str
 ) -> tuple[float, float]:
@@ -369,72 +445,41 @@ def compute_fidelity(
         image: Image tensor (C, H, W).
         saliency: Per-channel saliency map (C, H, W) from Explainer.explain().
         label: Target class index (0 or 1 for binary classification).
-        features_per_step: Number of (c, h, w) features to add/remove at each
-                           step. Must be >= 1. Controls curve granularity and
-                           computation cost. Total steps = ceil(C*H*W / features_per_step).
+        steps:    Number of masking steps.
         device: Torch device.
         path: File path to save the fidelity curve plot.
 
     Returns:
         Tuple of (deletion_auc, insertion_auc), both in [0, 1].
     """
-    C, H, W = image.shape
-    n_features = C * H * W
-
-    # Rank all C*H*W features globally by absolute saliency, descending.
-    flat_sal = np.abs(saliency).flatten()           # (C*H*W,)
-    ranked = np.argsort(flat_sal)[::-1].copy()      # descending importance
-
-    # Build the sequence of exact cumulative feature counts for each curve point.
-    # np.arange gives 0, features_per_step, 2*features_per_step, ...
-    # We cap at n_features so the last point always covers all features exactly.
-    thresholds = np.arange(0, n_features, features_per_step, dtype=int).tolist()
-    if thresholds[-1] != n_features:
-        thresholds.append(n_features)   # ensure we always evaluate the fully masked/revealed state
-
-    baseline = torch.zeros_like(image).to(device)
-    image_dev = image.to(device)
-
-    deletion_scores: list[float] = []
-    insertion_scores: list[float] = []
-
-    def _score(tensor: torch.Tensor) -> float:
-        """Run model on a single (C,H,W) tensor and return the true-class score."""
-        with torch.no_grad():
-            logit = model(tensor.unsqueeze(0))          # (1, 1) or (1,)
-            prob = torch.sigmoid(logit).squeeze()       # scalar
-            return prob.item() if label == 1 else (1.0 - prob.item())
-
-    for n_top in thresholds:
-        mask = np.ones(n_features, dtype=np.float32)
-        mask[ranked[:n_top]] = 0.0
-
-        mask_tensor = torch.tensor(
-            mask.reshape(C, H, W), dtype=torch.float32
-        ).to(device)                                    # (C, H, W)
-
-        deleted = image_dev * mask_tensor + baseline * (1.0 - mask_tensor)
-        deletion_scores.append(_score(deleted))
-
-        inserted = baseline + image_dev * (1.0 - mask_tensor)
-        insertion_scores.append(_score(inserted))
-
-    xs = np.array(thresholds, dtype=float) / n_features
-
-    del_auc = float(np.trapezoid(deletion_scores, xs))
-    ins_auc = float(np.trapezoid(insertion_scores, xs))
-
+    image = image.to(device)
+ 
+    # Pixel ranking: most important first (used by both curves)
+    ranked = np.argsort(saliency.flatten())[::-1]  # (H*W,) descending
+ 
+    del_scores = _fidelity_curve(model, image, ranked, label, steps, device, mode="deletion")
+    ins_scores = _fidelity_curve(model, image, ranked, label, steps, device, mode="insertion")
+ 
+    xs = torch.linspace(0.0, 1.0, steps + 1, device=device)
+    del_auc = float(torch.trapezoid(del_scores, xs).item())
+    ins_auc = float(torch.trapezoid(ins_scores, xs).item())
+ 
     # DEBUG plot
+    #xs_np  = xs.cpu().numpy()
+    #del_np = del_scores.cpu().numpy()
+    #ins_np = ins_scores.cpu().numpy()
+ 
     #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    #ax1.plot(xs, deletion_scores)
-    #ax1.set_xlabel("Fraction of features masked")
-    #ax1.set_ylabel("Model score (true class)")
-    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower is better)")
-    #ax2.plot(xs, insertion_scores)
-    #ax2.set_xlabel("Fraction of features revealed")
-    #ax2.set_ylabel("Model score (true class)")
-    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher is better)")
+    #ax1.plot(xs_np, del_np)
+    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
+    #ax1.set_xlabel("Fraction of pixels removed")
+    #ax1.set_ylabel("Model score")
+    #ax2.plot(xs_np, ins_np)
+    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
+    #ax2.set_xlabel("Fraction of pixels revealed")
+    #ax2.set_ylabel("Model score")
     #fig.tight_layout()
+    #os.makedirs(os.path.dirname(path), exist_ok=True)
     #fig.savefig(path)
     #plt.close(fig)
     # DEBUG plot
@@ -1370,7 +1415,44 @@ def collect_shap_background(
           f"value range [{background.min():.2f}, {background.max():.2f}]")
 
     return background
-
+def parse_model_filename(fname: str) -> Optional[dict]:
+    """Parse hyperparameters from a model filename.
+ 
+    Expected pattern:
+        model_kernel=[5,9,<K>]_<CF>_<CL>_<DN>_<DL>_wd<WD>_do<DO>
+        (with an optional .pth extension)
+ 
+    Example:
+        model_kernel=[5,9,23]_32_3_64_1_wd0.0001_do0.0.pth
+        → {kernel_size: 23, conv_filter: 32, conv_layer: 3,
+           dense_neuron: 64, dense_layer: 1,
+           weight_decay: 0.0001, dropout: 0.0}
+ 
+    Returns:
+        Dict of parsed values, or None if the filename does not match.
+    """
+    pattern = (
+        r"finetuned_fidelity_k=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
+        r"_(\d+)"                         # conv_filter
+        r"_(\d+)"                         # conv_layer
+        r"_(\d+)"                         # dense_neuron
+        r"_(\d+)"                         # dense_layer
+        r"_wd([0-9eE+\-\.]+)"            # weight_decay  (float, e.g. 1e-4 or 0.0001)
+        r"_do([0-9eE+\-\.]+)"            # dropout       (float, e.g. 0.0)
+        r"(?:\.pth)?$"                    # optional .pth extension
+    )
+    m = re.search(pattern, fname)
+    if m is None:
+        return None
+    return {
+        "kernel_size":   int(m.group(1)),
+        "conv_filter":   int(m.group(2)),
+        "conv_layer":    int(m.group(3)),
+        "dense_neuron":  int(m.group(4)),
+        "dense_layer":   int(m.group(5)),
+        "weight_decay":  float(m.group(6)),
+        "dropout":       float(m.group(7)),
+    }
 if __name__ == "__main__":
     DATA_DIR = "./DATA/Cat_dog_splitted/"
     DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
@@ -1385,39 +1467,88 @@ if __name__ == "__main__":
     methods_to_evaluate = ["gradcam", "shap"]
 
     shap_background = collect_shap_background(train_dataset,50,25)
-    CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT = 32,3,64,1,0.0
-
-    KERNEL_SIZES  = [11, 15, 19]  
-
-    WEIGHT_DECAYS  = [0.0, 1e-4, 1e-3]
     
-    for KERNEL_SIZE in KERNEL_SIZES:
-        for WEIGHT_DECAY in WEIGHT_DECAYS:
+    MODELS_DIR = "models/finetuned"
 
+    all_pth_files = sorted(
+        f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")
+    )
+ 
+    matched_models = []
+    for fname in all_pth_files:
+        stem  = fname[:-4]          # strip ".pth"
+        hparams = parse_model_filename(stem)
+        if hparams is None:
+            print(f"  [SKIP] Could not parse filename: {fname}")
+            continue
+        matched_models.append((fname, hparams))
+    
+    print(f"\nFound {len(matched_models)} matching model(s) in '{MODELS_DIR}':")
+    for fname, hp in matched_models:
+        print(f"  {fname}  ->  {hp}")
 
-            #model = CIFAKE_CNN(CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
-            model = I_HAVE_A_THEORY(KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER,DROPOUT).to(DEVICE)
-            MODEL_PATH = f"models/model_kernel=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}_wd{WEIGHT_DECAY}_do0.0"
-            print(MODEL_PATH)
-            state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-            model.load_state_dict(state_dict) 
-            model.eval()
+    if not matched_models:
+        raise SystemExit("No models matched the expected filename pattern. Nothing to do.")
 
-            target_layer = find_last_conv_layer(model)
+    for fname, hp in matched_models:
+        model_path = os.path.join(MODELS_DIR, fname)
+ 
+        output_dir = f"./interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
+ 
+        # Skip already-completed runs (CSV written as the last step)
+        csv_path = os.path.join(output_dir, "metrics_summary.csv")
+        if os.path.isfile(csv_path):
+            print(f"\n[SKIP] Already evaluated: {fname}  (found {csv_path})")
+            continue
+ 
+        print(f"\n{'='*70}")
+        print(f"  Model : {fname}")
+        print(f"  Params: {hp}")
+        print(f"  Output: {output_dir}")
+        print(f"{'='*70}")
+ 
+        # Build model from parsed hyperparameters
+        #try:
+        model = I_HAVE_A_THEORY(
+            kernel_size   = hp["kernel_size"],
+            conv_filters  = hp["conv_filter"],
+            conv_layers   = hp["conv_layer"],
+            dense_neurons = hp["dense_neuron"],
+            dense_layers  = hp["dense_layer"],
+            dropout_rate  = hp["dropout"],
+        ).to(DEVICE)
+        state_dict = torch.load(model_path, map_location=DEVICE)
+        model.load_state_dict(state_dict)
+        model.eval()
+        #except Exception as exc:
+        #    print(f"  [ERROR] Could not load model {fname}: {exc}")
+        #    continue
+ 
+        target_layer = find_last_conv_layer(model)
+        
+        config = EvalConfig(
+            target_layer           = target_layer,
+            n_samples              = 32,           # keep low for a quick test run
+            batch_size             = 32,
+            device                 = "cuda" if torch.cuda.is_available() else "cpu",
+            output_dir             = output_dir,
+            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
+            stability_n_perturbations = 5,
+            stability_noise_std    = 0.05,
+            separability_n_pairs   = 20,
+            separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
+            shap_background           = shap_background,
+            shap_explain_probability  = False,         # True = explain sigmoid probs
+        )
 
-            config = EvalConfig(
-                target_layer           = target_layer,
-                n_samples              = 32,           # keep low for a quick test run
-                batch_size             = 32,
-                device                 = "cuda" if torch.cuda.is_available() else "cpu",
-                output_dir             = f"./interpretability_results_dogs_k=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}_wd{WEIGHT_DECAY}_do0.0",
-                fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
-                stability_n_perturbations = 5,
-                stability_noise_std    = 0.05,
-                separability_n_pairs   = 20,
-                separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
-                shap_background           = shap_background,
-                shap_explain_probability  = False,         # True = explain sigmoid probs
-            )
+        try:
+            results = run_pipeline(model, test_dataset, methods_to_evaluate, config, idx_to_class)
+        except Exception as exc:
+            print(f"  [ERROR] Pipeline failed for {fname}: {exc}")
+            import traceback; traceback.print_exc()
+            continue
 
-            results = run_pipeline(model, test_dataset, methods_to_evaluate, config)
+        # Free GPU memory before loading the next model
+        del model
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
