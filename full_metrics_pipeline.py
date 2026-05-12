@@ -282,13 +282,11 @@ class Explainer:
             symmetrically normalised by the global max absolute value across
             all channels.
         """
-
         wrapped = ShapBinaryWrapper(
             self.model,
             explain_probability=self.config.shap_explain_probability
         ).to(self.device).eval()
 
-        # Use provided background or fall back to a single zero-image baseline
         if self.config.shap_background is not None:
             background = self.config.shap_background.to(self.device)
         else:
@@ -301,22 +299,24 @@ class Explainer:
         if isinstance(shap_vals, list):
             shap_vals = shap_vals[0]
 
-        shap_arr = np.array(shap_vals)  # (1, C, H, W) or (1, H, W, C)
+        shap_arr = np.array(shap_vals)
 
-        # Normalise axis order to (1, C, H, W)
         if shap_arr.ndim == 5 and shap_arr.shape[-1] == 1:
             shap_arr = shap_arr[..., 0]
         if shap_arr.ndim == 4 and shap_arr.shape[-1] in [1, 3]:
-            # (1, H, W, C) → (1, C, H, W)
             shap_arr = np.transpose(shap_arr, (0, 3, 1, 2))
 
-        # shap_arr[0] is now (C, H, W)
         chw = shap_arr[0].astype(np.float32)
 
-        # Symmetric normalisation by global max-abs so range is [-1, 1] (whe rank based on abs were needed)
-        max_abs = np.max(np.abs(chw)) + 1e-8
-        return (chw / max_abs)  # (C, H, W)
+        # For label 0 (cat), the model output is the dog score.
+        # Negative SHAP values = evidence for cat, so flip the sign
+        # so that "most important for the true class" always sorts correctly.
+        if label == 0:
+            chw = -chw
 
+        max_abs = np.max(np.abs(chw)) + 1e-8
+        return chw / max_abs  # (C, H, W)
+    
     def shap_raw_values(self, img: torch.Tensor) -> np.ndarray:
         """Return raw per-channel SHAP values without normalisation.
 
@@ -1233,6 +1233,109 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "model_test_f1": round(res.model_test_f1, 6),
             })
     print(f"  Saved: {save_path}")
+def load_correct_samples(
+    dataset: Dataset,
+    model: torch.nn.Module,
+    n_samples: int,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[list[torch.Tensor], list[int]]:
+    """Draw n_samples from a Dataset where the model predicts correctly,
+    with equal class balance (n_samples // 2 per class).
+
+    Args:
+        dataset: PyTorch Dataset with a .targets attribute, returning (image_tensor, label, path).
+        model: PyTorch model in eval mode.
+        n_samples: Total number of correctly classified samples. Must be even.
+        batch_size: DataLoader batch size.
+        device: Torch device.
+
+    Returns:
+        Tuple of (list of image tensors, list of integer labels), interleaved by class.
+    """
+    if not hasattr(dataset, "targets"):
+        raise AttributeError("Dataset must have a .targets attribute.")
+
+    n_per_class = n_samples // 2
+
+    # Separate shuffled indices by class upfront
+    class_to_idxs: dict[int, list[int]] = defaultdict(list)
+    shuffled = torch.randperm(len(dataset)).tolist()
+    for idx in shuffled:
+        class_to_idxs[int(dataset.targets[idx])].append(idx)
+
+    classes = sorted(class_to_idxs.keys())[:2]  # only class 0 and 1
+
+    images: dict[int, list[torch.Tensor]] = {c: [] for c in classes}
+    labels: dict[int, list[int]]          = {c: [] for c in classes}
+
+    model.eval()
+
+    # Process each class independently so we hit n_per_class for both
+    for cls in classes:
+        idxs = class_to_idxs[cls]
+        loader = DataLoader(
+            Subset(dataset, idxs),
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_skip_none,
+        )
+
+        with torch.no_grad():
+            for imgs, lbls, _ in loader:
+                imgs = imgs.float().to(device)
+
+                logits = model(imgs)
+                probs  = torch.sigmoid(logits).squeeze(-1)
+                preds  = (probs >= 0.5).long()
+
+                for img, lbl, pred in zip(imgs, lbls, preds):
+                    if pred.item() == lbl.item():
+                        images[cls].append(img.cpu())
+                        labels[cls].append(int(lbl.item()))
+
+                    if len(images[cls]) >= n_per_class:
+                        break
+
+                if len(images[cls]) >= n_per_class:
+                    break
+
+        found = len(images[cls])
+        if found < n_per_class:
+            print(f"  Warning: class {cls} only yielded {found} correct samples "
+                  f"(requested {n_per_class}).")
+        else:
+            print(f"  Class {cls}: collected {found} correctly classified samples.")
+
+    # Interleave classes so the sample list isn't class-sorted
+    out_images, out_labels = [], []
+    for img0, lbl0, img1, lbl1 in zip(
+        images[classes[0]], labels[classes[0]],
+        images[classes[1]], labels[classes[1]],
+    ):
+        out_images += [img0, img1]
+        out_labels += [lbl0, lbl1]
+    
+    # Extract numeric IDs from filenames for reproducibility reporting
+    for cls in classes:
+        class_name = dataset.classes[cls]
+        subset_idxs = class_to_idxs[cls][:len(images[cls])]  # only the ones we actually used
+
+        # Walk the subset loader indices back to original dataset paths
+        nums = []
+        collected = 0
+        for idx in class_to_idxs[cls]:
+            if collected >= len(images[cls]):
+                break
+            path, _ = dataset.samples[idx]
+            match = re.search(r"(\d+)", os.path.basename(path))
+            if match:
+                nums.append(int(match.group(1)))
+            collected += 1
+
+        print(f"  {class_name}_nums = {nums}")
+
+    return out_images, out_labels
 
 
 def load_samples(
@@ -1384,7 +1487,14 @@ def run_pipeline(
     print(f"{'='*60}")
 
 
-    images, labels = load_samples(dataset, config.n_samples, config.batch_size)
+    # images, labels = load_samples(dataset, config.n_samples, config.batch_size)
+    
+    # Loading correct samples
+    device = torch.device(config.device)
+    images, labels = load_correct_samples(
+        dataset, model, config.n_samples, config.batch_size, device
+    )
+    
     all_results: dict[str, MetricResults] = {}
     all_saliency: dict[str, list[np.ndarray]] = {}
 
