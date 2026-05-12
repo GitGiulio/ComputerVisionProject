@@ -36,10 +36,10 @@ BLUR_KERNEL_SIZE = 61
 BLUR_SIGMA = 20.0
 
 # --- Paste your numbers from load_correct_samples here ---
-cat_nums = [3967, 5651, 9689, 4069, 2839, 11652, 7146, 2709, 2193, 3703, 4626, 11172, 7960, 9995, 6561, 1029]   # replace with your actual list
-dog_nums = [9573, 4540, 11310, 10220, 4875, 10800, 6240, 10039, 3972, 11503, 3437, 6519, 9587, 4202, 7936, 4411]  # replace with your actual list
+cat_nums = [5646]   # replace with your actual list
+dog_nums = []  # replace with your actual list
 
-MODEL_PATH = "models/model_kernel=[5,9,15]_32_3_512_1_wd0.0001_do0.0.pth"
+MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_4096_3_wd0.0001_do0.0.pth"
 
 DATA_DIR = "./DATA/Cat_dog_splitted/"
 

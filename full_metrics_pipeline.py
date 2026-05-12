@@ -1317,9 +1317,9 @@ def load_correct_samples(
         out_labels += [lbl0, lbl1]
     
     # Extract numeric IDs from filenames for reproducibility reporting
+    nums_by_class: dict[str, list[int]] = {}
     for cls in classes:
         class_name = dataset.classes[cls]
-        subset_idxs = class_to_idxs[cls][:len(images[cls])]  # only the ones we actually used
 
         # Walk the subset loader indices back to original dataset paths
         nums = []
@@ -1333,9 +1333,10 @@ def load_correct_samples(
                 nums.append(int(match.group(1)))
             collected += 1
 
+        nums_by_class[class_name] = nums
         print(f"  {class_name}_nums = {nums}")
 
-    return out_images, out_labels
+    return out_images, out_labels, nums_by_class
 
 
 def load_samples(
@@ -1491,9 +1492,16 @@ def run_pipeline(
     
     # Loading correct samples
     device = torch.device(config.device)
-    images, labels = load_correct_samples(
+    images, labels, sample_nums = load_correct_samples(
         dataset, model, config.n_samples, config.batch_size, device
     )
+
+    # Save the sampled image numbers for reproducibility
+    nums_path = os.path.join(config.output_dir, "sampled_image_nums.txt")
+    with open(nums_path, "w") as _f:
+        for class_name, nums in sample_nums.items():
+            _f.write(f"{class_name}_nums = {nums}\n")
+    print(f"  Saved: {nums_path}")
     
     all_results: dict[str, MetricResults] = {}
     all_saliency: dict[str, list[np.ndarray]] = {}
@@ -1711,7 +1719,7 @@ if __name__ == "__main__":
 
     shap_background = collect_shap_background(train_dataset,50,25)
     
-    MODELS_DIR = "models/most_relevant"
+    MODELS_DIR = "models"
 
     all_pth_files = sorted(
         f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")
@@ -1736,7 +1744,7 @@ if __name__ == "__main__":
     for fname, hp in matched_models:
         model_path = os.path.join(MODELS_DIR, fname)
  
-        output_dir = f"./interpretability/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
+        output_dir = f"./fixed_fidelity_interpretability/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
  
         # Skip already-completed runs (CSV written as the last step)
         csv_path = os.path.join(output_dir, "metrics_summary.csv")
