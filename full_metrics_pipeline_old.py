@@ -20,12 +20,7 @@ from Grad_cam_visual import find_last_conv_layer
 from captum.metrics import infidelity
 import shap
 import re
-from torchvision.transforms import functional as TF
 
-DELETION_BASELINE = "blur"   # "black", "blur", or "mean"
-
-BLUR_KERNEL_SIZE = 61
-BLUR_SIGMA = 20.0
 
 class ShapBinaryWrapper(torch.nn.Module):
     """Wraps a model for use with shap.DeepExplainer.
@@ -350,46 +345,7 @@ class Explainer:
         if arr.ndim == 4 and arr.shape[1] in [1, 3]:
             arr = np.transpose(arr, (0, 2, 3, 1))
         return arr[0]  # (H, W, C)
-    
-def make_deletion_baseline(
-    image: torch.Tensor,
-    method: str = DELETION_BASELINE,
-) -> torch.Tensor:
-    """
-    Creates the baseline used to replace deleted pixels.
 
-    Options:
-        "black": deleted pixels become 0.
-        "blur": deleted pixels become Gaussian-blurred pixels.
-        "mean": deleted pixels become the image's mean RGB value.
-    """
-    method = method.lower()
-
-    if method == "black":
-        return torch.zeros_like(image)
-
-    if method == "blur":
-        kernel_size = BLUR_KERNEL_SIZE
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        return TF.gaussian_blur(
-            image,
-            kernel_size=[kernel_size, kernel_size],
-            sigma=[BLUR_SIGMA, BLUR_SIGMA],
-        )
-
-    if method == "mean":
-        # Per-channel mean: one average value for R, G, B separately.
-        # Shape: (C, 1, 1), broadcast to (C, H, W)
-        mean_rgb = image.mean(dim=(1, 2), keepdim=True)
-        return mean_rgb.expand_as(image)
-
-    raise ValueError(
-        f"Unknown DELETION_BASELINE='{method}'. "
-        "Choose from: 'black', 'blur', 'mean'."
-    )
-    
 def _fidelity_curve(
     model: torch.nn.Module,
     image: torch.Tensor,
@@ -399,31 +355,46 @@ def _fidelity_curve(
     device: torch.device,
     mode: str,          # "insertion" or "deletion"
 ) -> torch.Tensor:
+    """Core pixel-masking loop shared by insertion and deletion AUC.
+ 
+    Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
+    of class scores, one per masking step.
+ 
+    For *insertion*: starts from an all-zero image and progressively reveals
+    the most important pixels.  Score should rise quickly → high AUC is good.
+ 
+    For *deletion*: starts from the full image and progressively removes the
+    most important pixels.  Score should fall quickly → low AUC is good.
+ 
+    Args:
+        model:   PyTorch model already on `device`, will be put in eval mode.
+        image:   Single image tensor (C, H, W) on `device`.
+        ranked:  1-D int array of pixel indices sorted most-to-least important,
+                 length H*W.  Comes from argsort(saliency.flatten())[::-1].
+        label:   Ground-truth class index (0 or 1).
+        steps:   Number of masking steps (curve resolution).
+        device:  Torch device.
+        mode:    "insertion" or "deletion".
+ 
+    Returns:
+        1-D float tensor of shape (steps+1,) with values in [0, 1].
+    """
     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
 
     C, H, W = image.shape
     n_features = C * H * W
 
+    # Guard: saliency must have been computed for the same spatial size
     if len(ranked) != n_features:
         raise ValueError(
             f"ranked has {len(ranked)} entries but image has {n_features} pixels "
             f"({H}x{W}). Saliency map spatial size must match the image."
         )
 
-    image = image.to(device)
-
-    # New baseline: blurred image instead of black/zero image
-    baseline = gaussian_blur_baseline(
-        image,
-        kernel_size=31,
-        sigma=10.0,
-    ).to(device)
-
     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
-    ranked_t = ranked_t.clamp(0, n_features - 1)
 
-    image = image.to(device)
-    baseline = make_deletion_baseline(image).to(device)
+    # Safety clamp: catches any remaining off-by-one issues
+    ranked_t = ranked_t.clamp(0, n_features - 1)
 
     scores = []
     model.eval()
@@ -432,19 +403,16 @@ def _fidelity_curve(
             n_top = int(step / steps * n_features)
 
             if mode == "insertion":
-                # Start from blurred image, reveal important original pixels
                 mask = torch.zeros(n_features, device=device)
                 if n_top > 0:
                     mask[ranked_t[:n_top]] = 1.0
-            else:
-                # Start from original image, replace important pixels with blur
+            else:  # deletion
                 mask = torch.ones(n_features, device=device)
                 if n_top > 0:
                     mask[ranked_t[:n_top]] = 0.0
 
-            mask = mask.view(C, H, W)
-
-            masked = image * mask + baseline * (1.0 - mask)
+            mask   = mask.view(C, H, W)
+            masked = image * mask
 
             logit = model(masked.unsqueeze(0))
             prob  = torch.sigmoid(logit).squeeze()
@@ -452,107 +420,6 @@ def _fidelity_curve(
             scores.append(score)
 
     return torch.stack(scores)
-
-# def _fidelity_curve(
-#     model: torch.nn.Module,
-#     image: torch.Tensor,
-#     ranked: np.ndarray,
-#     label: int,
-#     steps: int,
-#     device: torch.device,
-#     mode: str,          # "insertion" or "deletion"
-# ) -> torch.Tensor:
-#     """Core pixel-masking loop shared by insertion and deletion AUC.
- 
-#     Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
-#     of class scores, one per masking step.
- 
-#     For *insertion*: starts from an all-zero image and progressively reveals
-#     the most important pixels.  Score should rise quickly → high AUC is good.
- 
-#     For *deletion*: starts from the full image and progressively removes the
-#     most important pixels.  Score should fall quickly → low AUC is good.
- 
-#     Args:
-#         model:   PyTorch model already on `device`, will be put in eval mode.
-#         image:   Single image tensor (C, H, W) on `device`.
-#         ranked:  1-D int array of pixel indices sorted most-to-least important,
-#                  length H*W.  Comes from argsort(saliency.flatten())[::-1].
-#         label:   Ground-truth class index (0 or 1).
-#         steps:   Number of masking steps (curve resolution).
-#         device:  Torch device.
-#         mode:    "insertion" or "deletion".
- 
-#     Returns:
-#         1-D float tensor of shape (steps+1,) with values in [0, 1].
-#     """
-#     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
-
-#     C, H, W = image.shape
-#     n_features = C * H * W
-
-#     # Guard: saliency must have been computed for the same spatial size
-#     if len(ranked) != n_features:
-#         raise ValueError(
-#             f"ranked has {len(ranked)} entries but image has {n_features} pixels "
-#             f"({H}x{W}). Saliency map spatial size must match the image."
-#         )
-
-#     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
-
-#     # Safety clamp: catches any remaining off-by-one issues
-#     ranked_t = ranked_t.clamp(0, n_features - 1)
-
-#     scores = []
-#     model.eval()
-#     with torch.no_grad():
-#         for step in range(steps + 1):
-#             n_top = int(step / steps * n_features)
-
-#             if mode == "insertion":
-#                 mask = torch.zeros(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 1.0
-#             else:  # deletion
-#                 mask = torch.ones(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 0.0
-
-#             mask   = mask.view(C, H, W)
-#             # masked = image * mask
-#             masked = image * mask + blurred_image * (1.0 - mask)
-
-#             logit = model(masked.unsqueeze(0))
-#             prob  = torch.sigmoid(logit).squeeze()
-#             score = prob if label == 1 else (1.0 - prob)
-#             scores.append(score)
-
-#     return torch.stack(scores)
-
-def gaussian_blur_baseline(
-    image: torch.Tensor,
-    kernel_size: int = 61,
-    sigma: float = 20.0,
-) -> torch.Tensor:
-    """
-    Creates a blurred version of the image to use as deletion/insertion baseline.
-
-    Args:
-        image: Tensor of shape (C, H, W), values in [0, 1].
-        kernel_size: Gaussian blur kernel size. Must be odd.
-        sigma: Blur strength.
-
-    Returns:
-        Blurred image tensor of shape (C, H, W).
-    """
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-
-    return TF.gaussian_blur(
-        image,
-        kernel_size=[kernel_size, kernel_size],
-        sigma=[sigma, sigma],
-    )
 
 def compute_fidelity(
     model: torch.nn.Module,
@@ -1565,7 +1432,7 @@ def parse_model_filename(fname: str) -> Optional[dict]:
         Dict of parsed values, or None if the filename does not match.
     """
     pattern = (
-        r"model_kernel=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
+        r"finetuned_fidelity_k=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
         r"_(\d+)"                         # conv_filter
         r"_(\d+)"                         # conv_layer
         r"_(\d+)"                         # dense_neuron
@@ -1601,7 +1468,7 @@ if __name__ == "__main__":
 
     shap_background = collect_shap_background(train_dataset,50,25)
     
-    MODELS_DIR = "models/most_relevant"
+    MODELS_DIR = "models/finetuned"
 
     all_pth_files = sorted(
         f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")
@@ -1626,7 +1493,7 @@ if __name__ == "__main__":
     for fname, hp in matched_models:
         model_path = os.path.join(MODELS_DIR, fname)
  
-        output_dir = f"./interpretability/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
+        output_dir = f"./interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
  
         # Skip already-completed runs (CSV written as the last step)
         csv_path = os.path.join(output_dir, "metrics_summary.csv")
