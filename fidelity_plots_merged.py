@@ -1,0 +1,547 @@
+import os
+import re
+from typing import Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from torchvision.io import read_image
+import torchvision.transforms.functional as TF
+
+from shared_code import (
+    get_tensor_transform,
+    I_HAVE_A_THEORY,
+    GradCAM,
+    SafeImageFolder,
+)
+
+from full_metrics_pipeline import (
+    EvalConfig,
+    Explainer,
+    _fidelity_curve,
+    collect_shap_background,
+)
+
+
+# ============================================================
+# EDIT ONLY THESE VALUES
+# ============================================================
+
+# --- Paste your numbers from load_correct_samples here ---
+cat_nums = [11563]
+dog_nums = [2073]
+
+MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_512_1_wd0.001_do0.0.pth"  # poor model
+MODEL_PATH = "models/model_kernel=[5,9,19]_32_3_512_1_wd0.001_do0.0.pth"  # best fidelity metric model
+
+DATA_DIR = "./DATA/Cat_dog_splitted/"
+
+OUTPUT_DIR = "./fidelity_plots/merged/"
+
+# Cat = 0, Dog = 1
+CLASS_NAMES = {
+    0: "Cat",
+    1: "Dog",
+}
+
+DELETION_STEPS = 300
+SNAPSHOT_FRACTIONS = [0.0, 0.25, 0.50, 0.75, 1]
+
+BLUR_KERNEL_SIZE = 61
+BLUR_SIGMA = 20.0
+
+# SHAP settings
+SHAP_BACKGROUND_SIZE = 50
+SHAP_BACKGROUND_BATCH_SIZE = 25
+SHAP_EXPLAIN_PROBABILITY = False
+
+GRADCAM_CMAP = "Reds"
+SHAP_CMAP = "bwr"
+
+# Row layout: (explainer, baseline) sorted by baseline then method
+ROW_ORDER = [
+    ("gradcam", "black"),
+    ("shap",    "black"),
+    ("gradcam", "blur"),
+    ("shap",    "blur"),
+    ("gradcam", "mean"),
+    ("shap",    "mean"),
+]
+
+
+# ============================================================
+# PARSE MODEL HYPERPARAMETERS FROM FILE NAME
+# ============================================================
+
+def parse_model_filename(model_path: str) -> Optional[dict]:
+    fname = os.path.basename(model_path)
+
+    patterns = [
+        r"model_kernel=\[5,9,(\d+)\]_(\d+)_(\d+)_(\d+)_(\d+)_wd([0-9eE+\-\.]+)_do([0-9eE+\-\.]+)(?:\.pth)?$",
+        r"finetuned_fidelity_k=\[5,9,(\d+)\]_(\d+)_(\d+)_(\d+)_(\d+)_wd([0-9eE+\-\.]+)_do([0-9eE+\-\.]+)(?:\.pth)?$",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, fname)
+        if m is not None:
+            return {
+                "kernel_size":  int(m.group(1)),
+                "conv_filter":  int(m.group(2)),
+                "conv_layer":   int(m.group(3)),
+                "dense_neuron": int(m.group(4)),
+                "dense_layer":  int(m.group(5)),
+                "weight_decay": float(m.group(6)),
+                "dropout":      float(m.group(7)),
+            }
+
+    return None
+
+
+# ============================================================
+# MODEL / IMAGE HELPERS
+# ============================================================
+
+def load_model(device: torch.device):
+    hp = parse_model_filename(MODEL_PATH)
+
+    if hp is None:
+        raise ValueError(
+            f"Could not parse model hyperparameters from:\n{MODEL_PATH}\n\n"
+            "Expected format like:\n"
+            "model_kernel=[5,9,15]_32_3_512_1_wd0.0001_do0.0.pth"
+        )
+
+    print("Parsed model hyperparameters:")
+    for key, value in hp.items():
+        print(f"  {key}: {value}")
+
+    model = I_HAVE_A_THEORY(
+        kernel_size=hp["kernel_size"],
+        conv_filters=hp["conv_filter"],
+        conv_layers=hp["conv_layer"],
+        dense_neurons=hp["dense_neuron"],
+        dense_layers=hp["dense_layer"],
+        dropout_rate=hp["dropout"],
+    ).to(device)
+
+    state_dict = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    return model, hp
+
+
+def load_image(image_path: str, device: torch.device):
+    transform = get_tensor_transform()
+
+    try:
+        img = read_image(image_path)
+    except RuntimeError:
+        from PIL import Image
+        import torchvision.transforms.functional as TVF
+        pil_img = Image.open(image_path).convert("RGB")
+        img = TVF.to_tensor(pil_img)
+        img = (img * 255).to(torch.uint8)
+
+    if img.ndim != 3:
+        raise ValueError(f"Invalid image shape: {img.shape}")
+    if img.shape[0] == 1:
+        img = img.expand(3, -1, -1)
+    elif img.shape[0] > 3:
+        img = img[:3, ...]
+
+    img = transform(img)
+    return img.float().to(device)
+
+
+def predict(model: torch.nn.Module, img: torch.Tensor):
+    model.eval()
+    with torch.no_grad():
+        logit = model(img.unsqueeze(0)).squeeze()
+        prob_class_1 = torch.sigmoid(logit).item()
+    pred_label = int(prob_class_1 >= 0.5)
+    pred_conf = prob_class_1 if pred_label == 1 else 1.0 - prob_class_1
+    return pred_label, pred_conf, prob_class_1
+
+
+def model_prob_for_label(model: torch.nn.Module, img: torch.Tensor, label: int):
+    model.eval()
+    with torch.no_grad():
+        logit = model(img.unsqueeze(0)).squeeze()
+        prob_class_1 = torch.sigmoid(logit)
+        score = prob_class_1 if label == 1 else (1.0 - prob_class_1)
+    return float(score.item())
+
+
+def tensor_to_numpy_image(img: torch.Tensor):
+    return img.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+
+
+# ============================================================
+# DELETION BASELINE + MASKING
+# ============================================================
+
+def make_deletion_baseline(image: torch.Tensor, method: str) -> torch.Tensor:
+    method = method.lower()
+
+    if method == "black":
+        return torch.zeros_like(image)
+
+    if method == "blur":
+        kernel_size = BLUR_KERNEL_SIZE + (1 - BLUR_KERNEL_SIZE % 2)
+        return TF.gaussian_blur(
+            image,
+            kernel_size=[kernel_size, kernel_size],
+            sigma=[BLUR_SIGMA, BLUR_SIGMA],
+        )
+
+    if method == "mean":
+        return image.mean(dim=(1, 2), keepdim=True).expand_as(image)
+
+    raise ValueError(f"Unknown baseline method '{method}'.")
+
+
+def make_masked_image(image, ranked, fraction_deleted, device, baseline_method):
+    image = image.to(device)
+    C, H, W = image.shape
+    n_features = C * H * W
+
+    ranked_t = torch.from_numpy(ranked.copy()).long().to(device).clamp(0, n_features - 1)
+
+    n_top = int(fraction_deleted * n_features)
+    mask = torch.ones(n_features, device=device)
+    if n_top > 0:
+        mask[ranked_t[:n_top]] = 0.0
+    mask = mask.view(C, H, W)
+
+    baseline = make_deletion_baseline(image, baseline_method).to(device)
+    return image * mask + baseline * (1.0 - mask)
+
+
+# ============================================================
+# GRADCAM
+# ============================================================
+
+def find_last_conv_layer(model: nn.Module):
+    last_conv = None
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            last_conv = module
+    if last_conv is None:
+        raise RuntimeError("No Conv2d layer found for GradCAM.")
+    return last_conv
+
+
+def normalise_heatmap(cam_map: np.ndarray):
+    hm = np.array(cam_map, dtype=np.float32)
+    hm = np.nan_to_num(hm)
+    hm = np.clip(hm, 0, None)
+    max_val = hm.max()
+    return hm / max_val if max_val > 0 else np.zeros_like(hm)
+
+
+def generate_gradcam(model: nn.Module, img: torch.Tensor, device: torch.device):
+    target_layer = find_last_conv_layer(model)
+    cam = GradCAM(model, target_layer)
+
+    try:
+        input_batch = img.unsqueeze(0).detach().clone().to(device)
+        input_batch.requires_grad_(True)
+        with torch.enable_grad():
+            cam_map = cam.generate(input_batch, use_logits=True)[0].detach().cpu().numpy()
+    finally:
+        cam.remove_hooks()
+
+    return normalise_heatmap(cam_map)
+
+
+def build_pipeline_saliency_from_gradcam(heatmap: np.ndarray, image: torch.Tensor):
+    C = image.shape[0]
+    return np.stack([heatmap] * C, axis=0).astype(np.float32)
+
+
+# ============================================================
+# SHAP
+# ============================================================
+
+def build_shap_config(device):
+    train_dataset = SafeImageFolder(
+        os.path.join(DATA_DIR, "train"),
+        transform=get_tensor_transform(),
+    )
+
+    shap_background = collect_shap_background(
+        train_dataset,
+        n_background=SHAP_BACKGROUND_SIZE,
+        batch_size=SHAP_BACKGROUND_BATCH_SIZE,
+    )
+
+    config = EvalConfig(
+        target_layer=None,
+        n_samples=1,
+        batch_size=1,
+        device=str(device),
+        output_dir=OUTPUT_DIR,
+        fidelity_features_per_step=DELETION_STEPS,
+        stability_n_perturbations=5,
+        stability_noise_std=0.05,
+        separability_n_pairs=20,
+        separability_eps=1e-3,
+        shap_background=shap_background,
+        shap_explain_probability=SHAP_EXPLAIN_PROBABILITY,
+    )
+
+    return config
+
+
+def generate_shap(model, img, config, target_label):
+    explainer = Explainer("shap", model, config)
+
+    try:
+        saliency = explainer.explain(img, target_label)   # (C, H, W)
+        shap_heatmap = saliency.sum(axis=0)               # (H, W)
+        max_abs = np.max(np.abs(shap_heatmap)) + 1e-8
+        shap_heatmap = shap_heatmap / max_abs             # [-1, 1]
+    finally:
+        explainer.remove_hooks()
+
+    return saliency.astype(np.float32), shap_heatmap.astype(np.float32)
+
+
+# ============================================================
+# FIDELITY CURVES
+# ============================================================
+
+def compute_curves(model, image, saliency, label, device, baseline_method):
+    """Compute deletion and insertion curves for a given baseline method."""
+    ranked = np.argsort(saliency.flatten())[::-1]
+
+    xs_t = torch.linspace(0.0, 1.0, DELETION_STEPS + 1, device=device)
+
+    del_scores_t = _fidelity_curve(
+        model=model, image=image.to(device), ranked=ranked,
+        label=label, steps=DELETION_STEPS, device=device, mode="deletion",
+        deletion_baseline=baseline_method
+    )
+    ins_scores_t = _fidelity_curve(
+        model=model, image=image.to(device), ranked=ranked,
+        label=label, steps=DELETION_STEPS, device=device, mode="insertion",
+        deletion_baseline=baseline_method
+    )
+
+    del_auc = float(torch.trapezoid(del_scores_t, xs_t).item())
+    ins_auc = float(torch.trapezoid(ins_scores_t, xs_t).item())
+
+    return (
+        xs_t.detach().cpu().numpy(),
+        del_scores_t.detach().cpu().numpy(),
+        ins_scores_t.detach().cpu().numpy(),
+        del_auc,
+        ins_auc,
+        ranked,
+    )
+
+
+# ============================================================
+# PLOT
+# ============================================================
+
+def draw_row(axes_row, model, image, heatmap, ranked,
+             xs, del_scores, ins_scores, del_auc, ins_auc,
+             target_label, explainer_name, baseline_method, device):
+    """Fill one row of the merged figure."""
+
+    # Heatmap
+    if explainer_name == "gradcam":
+        axes_row[0].imshow(heatmap, cmap=GRADCAM_CMAP, vmin=0, vmax=1)
+        row_label = f"GradCAM\n{baseline_method}"
+    else:
+        axes_row[0].imshow(heatmap, cmap=SHAP_CMAP, vmin=-1, vmax=1)
+        row_label = f"SHAP\n{baseline_method}"
+
+    axes_row[0].set_title(row_label, fontsize=8)
+    axes_row[0].axis("off")
+
+    # Deletion snapshots
+    for ax, frac in zip(axes_row[1:1 + len(SNAPSHOT_FRACTIONS)], SNAPSHOT_FRACTIONS):
+        masked = make_masked_image(image, ranked, frac, device, baseline_method)
+        prob = model_prob_for_label(model, masked, target_label)
+        ax.imshow(tensor_to_numpy_image(masked))
+        ax.set_title(f"Del {frac*100:.0f}%\nP={prob:.3f}", fontsize=7)
+        ax.axis("off")
+
+    # Curves
+    ax_c = axes_row[-1]
+    ax_c.plot(xs, del_scores, label=f"Del (dAUC={del_auc:.3f})", color="tab:red")
+    ax_c.plot(xs, ins_scores, label=f"Ins (iAUC={ins_auc:.3f})", color="tab:blue")
+    ax_c.fill_between(xs, del_scores, alpha=0.10, color="tab:red")
+    ax_c.fill_between(xs, ins_scores, alpha=0.10, color="tab:blue")
+
+    snap_scores = [del_scores[int(round(f * DELETION_STEPS))] for f in SNAPSHOT_FRACTIONS]
+    ax_c.scatter(SNAPSHOT_FRACTIONS, snap_scores, s=20, color="tab:red", zorder=3)
+
+    ax_c.set_xlabel("Pixel fraction", fontsize=7)
+    ax_c.set_ylabel("Pred. score", fontsize=7)
+    ax_c.set_ylim(0, 1.05)
+    ax_c.legend(fontsize=6)
+    ax_c.tick_params(labelsize=6)
+    ax_c.grid(alpha=0.25)
+    ax_c.set_title(f"dAUC={del_auc:.3f} | iAUC={ins_auc:.3f}", fontsize=7)
+
+
+def save_merged_plot(
+    model, image, device, hp,
+    gradcam_heatmap, gradcam_saliency,
+    shap_heatmap, shap_saliency,
+    pred_label, pred_conf, target_label,
+    img_num, class_name, out_path,
+):
+    n_rows = len(ROW_ORDER)
+    n_cols = 1 + len(SNAPSHOT_FRACTIONS) + 1   # heatmap + snapshots + curve
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(3.2 * n_cols, 3.2 * n_rows),
+    )
+
+    # Pre-compute curves for every (explainer, baseline) combination
+    curve_cache = {}
+    for explainer_name, baseline_method in ROW_ORDER:
+        key = (explainer_name, baseline_method)
+        if key in curve_cache:
+            continue
+
+        saliency = gradcam_saliency if explainer_name == "gradcam" else shap_saliency
+
+        print(f"  Computing curves: {explainer_name} / {baseline_method} ...")
+        xs, del_scores, ins_scores, del_auc, ins_auc, ranked = compute_curves(
+            model, image, saliency, target_label, device, baseline_method,
+        )
+        curve_cache[key] = (xs, del_scores, ins_scores, del_auc, ins_auc, ranked)
+
+    # Draw each row
+    for row_idx, (explainer_name, baseline_method) in enumerate(ROW_ORDER):
+        key = (explainer_name, baseline_method)
+        xs, del_scores, ins_scores, del_auc, ins_auc, ranked = curve_cache[key]
+
+        heatmap = gradcam_heatmap if explainer_name == "gradcam" else shap_heatmap
+
+        draw_row(
+            axes_row=axes[row_idx],
+            model=model,
+            image=image,
+            heatmap=heatmap,
+            ranked=ranked,
+            xs=xs,
+            del_scores=del_scores,
+            ins_scores=ins_scores,
+            del_auc=del_auc,
+            ins_auc=ins_auc,
+            target_label=target_label,
+            explainer_name=explainer_name,
+            baseline_method=baseline_method,
+            device=device,
+        )
+
+    pred_name = CLASS_NAMES.get(pred_label, str(pred_label))
+    fig.suptitle(
+        f"{class_name} #{img_num}  |  Pred: {pred_name} ({pred_conf:.3f})  |  "
+        f"Tracked: {CLASS_NAMES.get(target_label, target_label)}\n"
+        f"k={hp['kernel_size']}, cf={hp['conv_filter']}, cl={hp['conv_layer']}, "
+        f"dn={hp['dense_neuron']}, dl={hp['dense_layer']}, do={hp['dropout']}",
+        fontsize=11,
+    )
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+
+# ============================================================
+# PER-IMAGE PIPELINE
+# ============================================================
+
+def process_image(model, shap_config, hp, img_num, target_label, device):
+    class_name = CLASS_NAMES[target_label]
+    image_path = os.path.join(DATA_DIR, "test", class_name, f"{img_num}.jpg")
+
+    print(f"\n[{class_name} #{img_num}]  path: {image_path}")
+
+    if not os.path.isfile(image_path):
+        print(f"  WARNING: file not found, skipping.")
+        return
+
+    image = load_image(image_path, device)
+    pred_label, pred_conf, _ = predict(model, image)
+
+    print(f"  Pred: {CLASS_NAMES.get(pred_label)} ({pred_conf:.4f})  |  "
+          f"Tracked: {class_name}")
+
+    print("  Generating GradCAM...")
+    gradcam_heatmap = generate_gradcam(model, image, device)
+    gradcam_saliency = build_pipeline_saliency_from_gradcam(gradcam_heatmap, image)
+
+    print("  Generating SHAP...")
+    shap_saliency, shap_heatmap = generate_shap(model, image, shap_config, target_label)
+
+    out_path = os.path.join(
+        OUTPUT_DIR,
+        class_name.lower(),
+        f"{class_name.lower()}_{img_num}_merged.png",
+    )
+
+    save_merged_plot(
+        model=model,
+        image=image,
+        device=device,
+        hp=hp,
+        gradcam_heatmap=gradcam_heatmap,
+        gradcam_saliency=gradcam_saliency,
+        shap_heatmap=shap_heatmap,
+        shap_saliency=shap_saliency,
+        pred_label=pred_label,
+        pred_conf=pred_conf,
+        target_label=target_label,
+        img_num=img_num,
+        class_name=class_name,
+        out_path=out_path,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:", device)
+
+    print("\nLoading model...")
+    model, hp = load_model(device)
+
+    print("\nBuilding SHAP background (done once, reused for all images)...")
+    shap_config = build_shap_config(device)
+
+    work = (
+        [(n, 0) for n in cat_nums] +
+        [(n, 1) for n in dog_nums]
+    )
+
+    print(f"\nTotal images to process: {len(work)} "
+          f"({len(cat_nums)} cats, {len(dog_nums)} dogs)")
+
+    for i, (img_num, target_label) in enumerate(work, 1):
+        print(f"\n--- [{i}/{len(work)}] ---")
+        process_image(model, shap_config, hp, img_num, target_label, device)
+
+    print("\nAll done.")
+
+
+if __name__ == "__main__":
+    main()

@@ -22,8 +22,6 @@ import shap
 import re
 from torchvision.transforms import functional as TF
 
-DELETION_BASELINE = "blur"   # "black", "blur", or "mean"
-
 BLUR_KERNEL_SIZE = 61
 BLUR_SIGMA = 20.0
 
@@ -353,7 +351,7 @@ class Explainer:
     
 def make_deletion_baseline(
     image: torch.Tensor,
-    method: str = DELETION_BASELINE,
+    method: str,
 ) -> torch.Tensor:
     """
     Creates the baseline used to replace deleted pixels.
@@ -397,7 +395,8 @@ def _fidelity_curve(
     label: int,
     steps: int,
     device: torch.device,
-    mode: str,          # "insertion" or "deletion"
+    mode: str,  # "insertion" or "deletion"
+    deletion_baseline: str
 ) -> torch.Tensor:
     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
 
@@ -423,7 +422,7 @@ def _fidelity_curve(
     ranked_t = ranked_t.clamp(0, n_features - 1)
 
     image = image.to(device)
-    baseline = make_deletion_baseline(image).to(device)
+    baseline = make_deletion_baseline(image, deletion_baseline).to(device)
 
     scores = []
     model.eval()

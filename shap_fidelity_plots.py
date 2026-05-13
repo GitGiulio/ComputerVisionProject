@@ -30,20 +30,20 @@ from full_metrics_pipeline import (
 # EDIT ONLY THESE VALUES
 # ============================================================
 
-DELETION_BASELINE = "blur"   # "black", "blur", or "mean"
+DELETION_BASELINE = "mean"   # "black", "blur", or "mean"
 
 BLUR_KERNEL_SIZE = 61
 BLUR_SIGMA = 20.0
 
 # --- Paste your numbers from load_correct_samples here ---
-cat_nums = [5646]   # replace with your actual list
-dog_nums = []  # replace with your actual list
+cat_nums = []   # replace with your actual list
+dog_nums = [2073]  # replace with your actual list
 
-MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_4096_3_wd0.0001_do0.0.pth"
+MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_512_1_wd0.001_do0.0.pth"
 
 DATA_DIR = "./DATA/Cat_dog_splitted/"
 
-OUTPUT_DIR = "deletion_debug"
+OUTPUT_DIR = "./fidelity_plots/SHAP/"
 
 # Cat = 0, Dog = 1
 CLASS_NAMES = {
@@ -398,7 +398,7 @@ def process_image(model, config, hp, img_num, target_label, device):
     out_path = os.path.join(
         OUTPUT_DIR,
         class_name.lower(),
-        f"{class_name.lower()}_{img_num}_{DELETION_BASELINE}.png",
+        f"SHAP_{class_name.lower()}_{img_num}_{DELETION_BASELINE}.png",
     )
 
     save_plot(
