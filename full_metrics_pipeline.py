@@ -195,7 +195,7 @@ class Explainer:
         return dispatch[self.method](image_tensor, label)
 
 
-    def _gradcam_raw(self, img: torch.Tensor) -> np.ndarray:
+    def _gradcam_raw(self, img: torch.Tensor,label: int) -> np.ndarray:
         """Shared GradCAM forward/backward pass, returns raw upsampled CAM.
 
         Backpropagates on the raw model output (scalar logit for binary models,
@@ -204,6 +204,7 @@ class Explainer:
 
         Args:
             img: Image tensor (C, H, W), already on the correct device.
+            label: Ground-truth (or predicted) class index.
 
         Returns:
             Raw float32 CAM of shape (H, W), ReLU-ed but NOT normalised.
@@ -216,6 +217,9 @@ class Explainer:
             score = out.squeeze()
         else:
             score = out[0].max()
+        
+        prob = torch.sigmoid(score)
+        score = prob if label == 1 else (1.0 - prob)
         score.backward()
 
         weights = self._gradients.mean(dim=(2, 3), keepdim=True)  # (1, C, 1, 1)
@@ -262,7 +266,7 @@ class Explainer:
         Returns:
             Saliency map (C, H, W), values in [0, 1], identical across channels.
         """
-        raw = self._gradcam_raw(img.to(self.device))          # (H, W)
+        raw = self._gradcam_raw(img.to(self.device),label)          # (H, W)
         normalised_hw = _normalise(raw)                        # (H, W)
         C = img.shape[0]
         return np.stack([normalised_hw] * C, axis=0)           # (C, H, W)
@@ -598,23 +602,23 @@ def compute_fidelity(
     ins_auc = float(torch.trapezoid(ins_scores, xs).item())
  
     # DEBUG plot
-    #xs_np  = xs.cpu().numpy()
-    #del_np = del_scores.cpu().numpy()
-    #ins_np = ins_scores.cpu().numpy()
+    xs_np  = xs.cpu().numpy()
+    del_np = del_scores.cpu().numpy()
+    ins_np = ins_scores.cpu().numpy()
  
-    #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    #ax1.plot(xs_np, del_np)
-    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
-    #ax1.set_xlabel("Fraction of pixels removed")
-    #ax1.set_ylabel("Model score")
-    #ax2.plot(xs_np, ins_np)
-    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
-    #ax2.set_xlabel("Fraction of pixels revealed")
-    #ax2.set_ylabel("Model score")
-    #fig.tight_layout()
-    #os.makedirs(os.path.dirname(path), exist_ok=True)
-    #fig.savefig(path)
-    #plt.close(fig)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    ax1.plot(xs_np, del_np)
+    ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
+    ax1.set_xlabel("Fraction of pixels removed")
+    ax1.set_ylabel("Model score")
+    ax2.plot(xs_np, ins_np)
+    ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
+    ax2.set_xlabel("Fraction of pixels revealed")
+    ax2.set_ylabel("Model score")
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fig.savefig(path)
+    plt.close(fig)
     # DEBUG plot
 
     return del_auc, ins_auc
