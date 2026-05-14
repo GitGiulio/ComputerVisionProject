@@ -32,13 +32,13 @@ from full_metrics_pipeline import (
 # ============================================================
 
 # --- Paste your numbers from load_correct_samples here ---
-cat_nums = [11563]
-dog_nums = [2073]
+cat_nums = [777777]
+dog_nums = [777777]
 
-MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_512_1_wd0.001_do0.0.pth"  # poor model
-MODEL_PATH = "models/model_kernel=[5,9,19]_32_3_512_1_wd0.001_do0.0.pth"  # best fidelity metric model
+MODEL_PATH = "./models/model_kernel=[5,9,11]_32_3_512_1_wd0.001_do0.0.pth"  # poor model
+MODEL_PATH = "./models/model_kernel=[5,9,19]_32_3_512_1_wd0.001_do0.0.pth"  # best fidelity metric model
 
-DATA_DIR = "./DATA/Cat_dog_splitted/"
+DATA_DIR = "./Cat_dog_splitted/"
 
 OUTPUT_DIR = "./fidelity_plots/merged/"
 
