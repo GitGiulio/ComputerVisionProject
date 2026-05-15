@@ -5,19 +5,23 @@ Generates metric comparison plots across models from interpretability result fol
 Folder naming convention:
   interpretability_results_dogs_k=[5,9,{KERNEL_SIZE}]_{CONV_FILTER}_{CONV_LAYER}_{DENSE_NEURON}_{DENSE_LAYER}_wd{WEIGHT_DECAY}_do{DROPOUT}
 
+Optionally place a "baseline/" folder (same structure as the model folders) in the
+root directory.  Its metrics_summary.csv will be read and drawn as a horizontal
+reference line on every plot (same hue as the metric line, slightly desaturated and
+semi-transparent).
+
 Usage:
   python plot_model_metrics.py --root_dir ./.. --output_dir ./plots
 """
 
 import os
 import re
-import glob
 import argparse
+import colorsys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -39,10 +43,10 @@ LINE_PLOT_CONFIGS = [
         "method":  "shap",
         "sort_by": "params",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-           # ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
+            ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
+           # ("Stability",     "stability",      "#2ab85a"),
+            ("Test Accuracy", "model_test_acc", "#c49a00"),
         ],
     },
     {
@@ -50,10 +54,10 @@ LINE_PLOT_CONFIGS = [
         "method":  "gradcam",
         "sort_by": "params",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-           # ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
+            ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
+        #    ("Stability",     "stability",      "#2ab85a"),
+            ("Test Accuracy", "model_test_acc", "#c49a00"),
         ],
     },
     {
@@ -61,10 +65,10 @@ LINE_PLOT_CONFIGS = [
         "method":  "shap",
         "sort_by": "accuracy",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-         #   ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
+            ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
+       #     ("Stability",     "stability",      "#2ab85a"),
+            ("Test Accuracy", "model_test_acc", "#c49a00"),
         ],
     },
     {
@@ -72,10 +76,10 @@ LINE_PLOT_CONFIGS = [
         "method":  "gradcam",
         "sort_by": "accuracy",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-         #   ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
+            ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
+       #     ("Stability",     "stability",      "#2ab85a"),
+            ("Test Accuracy", "model_test_acc", "#c49a00"),
         ],
     },
 ]
@@ -90,23 +94,48 @@ FOLDER_RE = re.compile(
     r"_do(?P<dropout>.+)$"
 )
 
+# ── Light theme ──────────────────────────────────────────────────────────────
+
 STYLE = {
-    "figure.facecolor": "#0f1117",
-    "axes.facecolor":   "#1a1d27",
-    "axes.edgecolor":   "#3a3d4d",
-    "axes.labelcolor":  "#e0e0e0",
-    "xtick.color":      "#a0a0b0",
-    "ytick.color":      "#a0a0b0",
-    "text.color":       "#e0e0e0",
-    "grid.color":       "#2a2d3d",
+    "figure.facecolor": "#ffffff",
+    "axes.facecolor":   "#f7f8fc",
+    "axes.edgecolor":   "#c0c4d0",
+    "axes.labelcolor":  "#222233",
+    "xtick.color":      "#444455",
+    "ytick.color":      "#444455",
+    "text.color":       "#222233",
+    "grid.color":       "#d8dae8",
     "grid.linestyle":   "--",
-    "grid.alpha":       0.6,
+    "grid.alpha":       0.8,
     "font.family":      "sans-serif",
 }
 
-ACCENT_COLOR  = "#7c9ef7"
-ACCENT2_COLOR = "#f7a07c"
+ACCENT_COLOR  = "#3a6fd8"   # blue  (SHAP / default)
+ACCENT2_COLOR = "#d85a2a"   # orange (GradCAM)
 
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+
+def _hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _rgb_to_hex(r: float, g: float, b: float) -> str:
+    return "#{:02x}{:02x}{:02x}".format(
+        int(r * 255), int(g * 255), int(b * 255)
+    )
+
+
+def desaturate(hex_color: str, factor: float = 0.45) -> str:
+    """Return a desaturated version of *hex_color* (factor 0 = grey, 1 = original)."""
+    r, g, b = _hex_to_rgb(hex_color)
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    r2, g2, b2 = colorsys.hsv_to_rgb(h, s * factor, v)
+    return _rgb_to_hex(r2, g2, b2)
+
+
+# ── Folder / CSV parsing ──────────────────────────────────────────────────────
 
 def parse_folder_name(folder_name: str) -> dict | None:
     base = os.path.basename(folder_name.rstrip("/\\"))
@@ -122,23 +151,85 @@ def parse_folder_name(folder_name: str) -> dict | None:
     return d
 
 
-def load_folder(folder_path: str) -> pd.DataFrame | None:
-    df = pd.read_csv(folder_path + "/" + "metrics_summary.csv")
+def load_csv(folder_path: str) -> pd.DataFrame | None:
+    csv_path = os.path.join(folder_path, "metrics_summary.csv")
+    if not os.path.isfile(csv_path):
+        return None
+    df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
     df["method"] = df["method"].str.strip().str.lower()
     return df
 
 
+# ── Baseline loading ──────────────────────────────────────────────────────────
+
+def load_baseline(root_dir: str) -> dict:
+    """
+    Read <root_dir>/baseline/metrics_summary.csv and return a nested dict:
+        { method_or_None: { column: value } }
+    where method_or_None is None for model-level columns (model_test_acc etc.).
+
+    Returns an empty dict if no baseline folder / CSV is found.
+    """
+    baseline_dir = os.path.join(root_dir, "baseline")
+    df = load_csv(baseline_dir)
+    if df is None:
+        print("  [info] No baseline/ folder found – skipping baseline lines.")
+        return {}
+
+    baseline: dict = {}
+    numeric_cols = ["insertion_auc", "deletion_auc", "stability",
+                    "model_test_acc", "model_val_acc", "model_tot_param"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Model-level columns (same across methods) → key None
+    model_cols = ["model_test_acc", "model_val_acc", "model_tot_param"]
+    baseline[None] = {}
+    for col in model_cols:
+        if col in df.columns:
+            val = df[col].dropna().mean()
+            if not np.isnan(val):
+                baseline[None][col] = val
+
+    # Method-level columns
+    for method, grp in df.groupby("method"):
+        baseline[method] = {}
+        for col in ["insertion_auc", "deletion_auc", "stability"]:
+            if col in grp.columns:
+                val = grp[col].dropna().mean()
+                if not np.isnan(val):
+                    baseline[method][col] = val
+
+    print(f"  [info] Baseline loaded from '{baseline_dir}'.")
+    return baseline
+
+
+def get_baseline_value(baseline: dict, method: str | None, column: str) -> float | None:
+    """Return the baseline scalar for (method, column), or None if not available."""
+    # model-level columns live under key None
+    if column in ("model_test_acc", "model_val_acc", "model_tot_param"):
+        return baseline.get(None, {}).get(column)
+    if method is not None:
+        return baseline.get(method, {}).get(column)
+    return None
+
+
+# ── Data collection ───────────────────────────────────────────────────────────
+
 def collect_data(root_dir: str) -> pd.DataFrame:
     records = []
-    print(os.getcwd())
-    for entry in os.scandir(os.getcwd()):
+    scan_dir = os.getcwd() if root_dir == "." else root_dir
+    for entry in os.scandir(scan_dir):
         if not entry.is_dir():
+            continue
+        if entry.name == "baseline":      # skip – handled separately
             continue
         params = parse_folder_name(entry.name)
         if params is None:
             continue
-        df = load_folder(entry.path)
+        df = load_csv(entry.path)
         if df is None:
             print(f"  [warn] no CSV in {entry.name}")
             continue
@@ -157,6 +248,8 @@ def collect_data(root_dir: str) -> pd.DataFrame:
     return combined
 
 
+# ── Label helpers ─────────────────────────────────────────────────────────────
+
 def make_x_labels(sorted_folders: list[str], params_map: dict) -> list[str]:
     labels = []
     for f in sorted_folders:
@@ -171,7 +264,6 @@ def make_x_labels(sorted_folders: list[str], params_map: dict) -> list[str]:
 
 
 def sort_folders_by_params(df: pd.DataFrame) -> list[str]:
-    """Sort by (model_tot_param ASC, weight_decay ASC)."""
     ref = (
         df[["folder", "model_tot_param", "weight_decay"]]
         .drop_duplicates("folder")
@@ -181,7 +273,6 @@ def sort_folders_by_params(df: pd.DataFrame) -> list[str]:
 
 
 def sort_folders_by_accuracy(df: pd.DataFrame) -> list[str]:
-    """Sort by model_test_acc ASC (left = worst, right = best)."""
     ref = (
         df[["folder", "model_test_acc"]]
         .drop_duplicates("folder")
@@ -189,6 +280,8 @@ def sort_folders_by_accuracy(df: pd.DataFrame) -> list[str]:
     )
     return ref["folder"].tolist()
 
+
+# ── Secondary axes ────────────────────────────────────────────────────────────
 
 def _add_param_axis(ax, df, sorted_folders, x):
     ax2 = ax.twiny()
@@ -198,10 +291,10 @@ def _add_param_axis(ax, df, sorted_folders, x):
     labels = []
     for f in sorted_folders:
         p = ref.loc[f, "model_tot_param"] if f in ref.index else np.nan
-        labels.append(f"{int(p)/1000000:.2f}M" if not np.isnan(p) else "?")
-    ax2.set_xticklabels(labels, fontsize=6.5, color="#7090c0")
-    ax2.set_xlabel("Total parameters ->", fontsize=8, color="#7090c0", labelpad=4)
-    ax2.tick_params(axis="x", colors="#7090c0")
+        labels.append(f"{int(p)/1e6:.2f}M" if not np.isnan(p) else "?")
+    ax2.set_xticklabels(labels, fontsize=6.5, color="#2255aa")
+    ax2.set_xlabel("Total parameters →", fontsize=8, color="#2255aa", labelpad=4)
+    ax2.tick_params(axis="x", colors="#2255aa")
     for spine in ax2.spines.values():
         spine.set_visible(False)
     return ax2
@@ -215,16 +308,47 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
     labels = []
     for f in sorted_folders:
         a = ref.loc[f, "model_test_acc"] if f in ref.index else np.nan
-        labels.append(f".{(a*1000):.0f}" if not np.isnan(a) else "?")
-    ax2.set_xticklabels(labels, fontsize=6.5, color="#90c070")
-    ax2.set_xlabel("Test accuracy ->", fontsize=8, color="#90c070", labelpad=4)
-    ax2.tick_params(axis="x", colors="#90c070")
+        labels.append(f".{int(a*1000)}" if not np.isnan(a) else "?")
+    ax2.set_xticklabels(labels, fontsize=6.5, color="#337722")
+    ax2.set_xlabel("Test accuracy →", fontsize=8, color="#337722", labelpad=4)
+    ax2.tick_params(axis="x", colors="#337722")
     for spine in ax2.spines.values():
         spine.set_visible(False)
     return ax2
 
 
-# ── Single-metric line plots ───────────────────────────────────────────────────
+# ── Baseline drawing helper ───────────────────────────────────────────────────
+
+def _draw_baseline_hline(ax, value: float, color: str,
+                         label: str = "baseline",
+                         alpha: float = 0.45,
+                         desaturate_factor: float = 0.45):
+    """Draw a horizontal dashed line for a baseline value."""
+    ds_color = desaturate(color, desaturate_factor)
+    ax.axhline(
+        y=value,
+        color=ds_color,
+        linewidth=1.4,
+        linestyle="--",
+        alpha=alpha,
+        zorder=2,
+        label=label,
+    )
+    # Small text annotation on the right edge
+    xlim = ax.get_xlim()
+    ax.text(
+        xlim[1],
+        value,
+        f" {value:.3f}",
+        color=ds_color,
+        fontsize=6.5,
+        va="center",
+        alpha=alpha + 0.15,
+        clip_on=False,
+    )
+
+
+# ── Single-metric line plots ──────────────────────────────────────────────────
 
 def plot_metric(
     df: pd.DataFrame,
@@ -235,7 +359,8 @@ def plot_metric(
     column: str,
     y_label: str,
     output_path: str,
-    secondary_axis: str = "params",   # "params" or "accuracy"
+    baseline: dict,
+    secondary_axis: str = "params",
 ):
     sub = df[df["method"] == method] if method else df.drop_duplicates("folder")
 
@@ -249,14 +374,12 @@ def plot_metric(
         )
 
     x = np.arange(len(sorted_folders))
-    valid = [v for v in y_vals if not np.isnan(v)]
-    y_max = max(valid) if valid else 1.0
 
     with plt.rc_context(STYLE):
         fig, ax = plt.subplots(figsize=(max(10, len(sorted_folders) * 1.0), 8))
 
         ax.plot(x, y_vals, color=ACCENT_COLOR, linewidth=2,
-                marker="o", markersize=6, zorder=3)
+                marker="o", markersize=6, zorder=3, label=y_label)
 
         for xi, val in zip(x, y_vals):
             if not np.isnan(val):
@@ -266,8 +389,15 @@ def plot_metric(
                     xytext=(0, 8),
                     textcoords="offset points",
                     ha="center", va="bottom",
-                    fontsize=7, color="#c8cfe8",
+                    fontsize=7, color="#333355",
                 )
+
+        # Baseline line
+        bval = get_baseline_value(baseline, method, column)
+        if bval is not None:
+            _draw_baseline_hline(ax, bval, ACCENT_COLOR, label="baseline")
+            ax.legend(loc="upper left", fontsize=8,
+                      facecolor="#ffffff", edgecolor="#c0c4d0")
 
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, fontsize=7, ha="center")
@@ -290,7 +420,7 @@ def plot_metric(
 
 
 def plot_all(df, sorted_folders_params, sorted_folders_acc,
-             x_labels_params, x_labels_acc, output_dir):
+             x_labels_params, x_labels_acc, output_dir, baseline):
     os.makedirs(output_dir, exist_ok=True)
     for title, method, column, y_label in METRICS:
         safe = title.lower().replace(" ", "_").replace("-", "").replace("__", "_")
@@ -299,18 +429,19 @@ def plot_all(df, sorted_folders_params, sorted_folders_acc,
                     title + "  [sorted by parameter count]",
                     method, column, y_label,
                     os.path.join(output_dir, f"{safe}_by_params.png"),
-                    secondary_axis="params")
+                    baseline, secondary_axis="params")
 
         plot_metric(df, sorted_folders_acc, x_labels_acc,
                     title + "  [sorted by test accuracy]",
                     method, column, y_label,
                     os.path.join(output_dir, f"{safe}_by_accuracy.png"),
-                    secondary_axis="accuracy")
+                    baseline, secondary_axis="accuracy")
 
 
 # ── Summary grids ─────────────────────────────────────────────────────────────
 
-def plot_summary_grid(df, sorted_folders, x_labels, output_dir, suffix="by_params"):
+def plot_summary_grid(df, sorted_folders, x_labels, output_dir,
+                      baseline: dict, suffix="by_params"):
     n = len(METRICS)
     cols = 2
     rows = (n + 1) // cols
@@ -346,6 +477,12 @@ def plot_summary_grid(df, sorted_folders, x_labels, output_dir, suffix="by_param
                     ax.annotate(f"{val:.3f}", xy=(xi, val), xytext=(0, 6),
                                 textcoords="offset points", ha="center",
                                 fontsize=5.5, color=color)
+
+            # Baseline line
+            bval = get_baseline_value(baseline, method, column)
+            if bval is not None:
+                _draw_baseline_hline(ax, bval, color)
+
             ax.set_xticks(x)
             ax.set_xticklabels(x_labels, fontsize=6, ha="center")
             ax.set_ylabel(y_label, fontsize=8)
@@ -377,11 +514,8 @@ def plot_multi_metric_line(
     x_labels: list[str],
     config: dict,
     output_path: str,
+    baseline: dict,
 ):
-    """
-    Line plot: multiple metrics on the same y-axis, one line per metric.
-    model_test_acc is model-level (same value regardless of method row).
-    """
     method     = config["method"]
     metrics    = config["metrics"]   # [(label, column, color), ...]
     sort_by    = config["sort_by"]
@@ -394,6 +528,8 @@ def plot_multi_metric_line(
     with plt.rc_context(STYLE):
         fig, ax = plt.subplots(figsize=(max(12, len(sorted_folders) * 1.0), 8))
 
+        baseline_handles = []   # collect for legend dedup
+
         for label, column, color in metrics:
             source = model_sub if column == "model_test_acc" else method_sub
 
@@ -404,9 +540,18 @@ def plot_multi_metric_line(
                 else:
                     y_vals.append(np.nan)
 
+            display_label = label
+            bval = get_baseline_value(baseline, method, column)
+
+            if label == "Deletion AUC":
+                y_vals = list(1 - np.array(y_vals))
+                display_label = "1 - Deletion AUC"
+                if bval is not None:
+                    bval = 1 - bval
+
             ax.plot(x, y_vals,
                     color=color, linewidth=2, marker="o", markersize=5,
-                    label=label, zorder=3)
+                    label=display_label, zorder=3)
 
             for xi, val in zip(x, y_vals):
                 if not np.isnan(val):
@@ -418,6 +563,13 @@ def plot_multi_metric_line(
                         ha="center", fontsize=6.5, color=color,
                     )
 
+            # Baseline horizontal line (same colour, desaturated)
+            if bval is not None:
+                _draw_baseline_hline(
+                    ax, bval, color,
+                    label=f"{display_label} (baseline)"
+                )
+
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, fontsize=7, ha="center")
         ax.set_ylabel("Metric value", fontsize=10)
@@ -425,9 +577,9 @@ def plot_multi_metric_line(
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
         ax.grid(axis="both", zorder=0)
         ax.set_xlim(-0.6, len(sorted_folders) - 0.4)
-        ax.legend(loc="upper left", fontsize=9,
-                  facecolor="#1a1d27", edgecolor="#3a3d4d",
-                  labelcolor="#e0e0e0")
+        ax.legend(loc="center right", fontsize=8,
+                  facecolor="#ffffff", edgecolor="#c0c4d0",
+                  labelcolor="#222233")
 
         if sort_by == "params":
             _add_param_axis(ax, df, sorted_folders, x)
@@ -442,7 +594,7 @@ def plot_multi_metric_line(
 
 
 def plot_all_line_plots(df, sorted_folders_params, sorted_folders_acc,
-                        x_labels_params, x_labels_acc, output_dir):
+                        x_labels_params, x_labels_acc, output_dir, baseline):
     os.makedirs(output_dir, exist_ok=True)
     folder_map = {"params": sorted_folders_params, "accuracy": sorted_folders_acc}
     label_map  = {"params": x_labels_params,       "accuracy": x_labels_acc}
@@ -464,6 +616,7 @@ def plot_all_line_plots(df, sorted_folders_params, sorted_folders_acc,
             label_map[cfg["sort_by"]],
             cfg,
             out,
+            baseline,
         )
 
 
@@ -476,6 +629,10 @@ def main():
     args = parser.parse_args()
 
     print(f"Scanning '{args.root_dir}' for model folders ...")
+
+    # Load baseline BEFORE collecting model data (uses the same root_dir)
+    baseline = load_baseline(args.root_dir)
+
     df = collect_data(args.root_dir)
     print(f"  found {df['folder'].nunique()} model(s), {len(df)} rows total")
 
@@ -486,16 +643,17 @@ def main():
     x_labels_params    = make_x_labels(sorted_by_params,   params_map)
     x_labels_acc       = make_x_labels(sorted_by_accuracy, params_map)
 
-    #print("\nGenerating single-metric line plots (both orderings) ...")
-    #plot_all(df, sorted_by_params, sorted_by_accuracy,x_labels_params, x_labels_acc, args.output_dir)
+    print("\nGenerating single-metric line plots (both orderings) ...")
+    plot_all(df, sorted_by_params, sorted_by_accuracy,
+             x_labels_params, x_labels_acc, args.output_dir, baseline)
 
-    #print("\nGenerating summary grids ...")
-    #plot_summary_grid(df, sorted_by_params,   x_labels_params, args.output_dir, suffix="by_params")
-    #plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, suffix="by_accuracy")
+    print("\nGenerating summary grids ...")
+    plot_summary_grid(df, sorted_by_params,   x_labels_params, args.output_dir, baseline, suffix="by_params")
+    plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, baseline, suffix="by_accuracy")
 
     print("\nGenerating multi-metric line plots ...")
     plot_all_line_plots(df, sorted_by_params, sorted_by_accuracy,
-                        x_labels_params, x_labels_acc, args.output_dir)
+                        x_labels_params, x_labels_acc, args.output_dir, baseline)
 
     print(f"\nDone! All plots saved to '{args.output_dir}/'")
 

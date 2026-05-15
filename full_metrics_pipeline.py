@@ -1687,7 +1687,7 @@ def parse_model_filename(fname: str) -> Optional[dict]:
         Dict of parsed values, or None if the filename does not match.
     """
     pattern = (
-        r"model_kernel=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
+        r"finetuned_fidelity_k=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
         r"_(\d+)"                         # conv_filter
         r"_(\d+)"                         # conv_layer
         r"_(\d+)"                         # dense_neuron
@@ -1723,7 +1723,7 @@ if __name__ == "__main__":
 
     shap_background = collect_shap_background(train_dataset,50,25)
     
-    MODELS_DIR = "models"
+    MODELS_DIR = "models/to_test"
 
     all_pth_files = sorted(
         f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")
@@ -1748,7 +1748,7 @@ if __name__ == "__main__":
     for fname, hp in matched_models:
         model_path = os.path.join(MODELS_DIR, fname)
  
-        output_dir = f"./fixed_fidelity_interpretability/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
+        output_dir = f"./finetuning/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
  
         # Skip already-completed runs (CSV written as the last step)
         csv_path = os.path.join(output_dir, "metrics_summary.csv")
@@ -1773,7 +1773,8 @@ if __name__ == "__main__":
             dropout_rate  = hp["dropout"],
         ).to(DEVICE)
         state_dict = torch.load(model_path, map_location=DEVICE)
-        model.load_state_dict(state_dict)
+        
+        model.load_state_dict(state_dict, strict=False)
         model.eval()
         #except Exception as exc:
         #    print(f"  [ERROR] Could not load model {fname}: {exc}")
@@ -1787,7 +1788,7 @@ if __name__ == "__main__":
             batch_size             = 32,
             device                 = "cuda" if torch.cuda.is_available() else "cpu",
             output_dir             = output_dir,
-            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
+            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 features per step
             stability_n_perturbations = 5,
             stability_noise_std    = 0.05,
             separability_n_pairs   = 20,

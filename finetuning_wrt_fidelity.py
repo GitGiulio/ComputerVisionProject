@@ -33,40 +33,41 @@ from full_metrics_pipeline import (
     Explainer,
     ShapBinaryWrapper,
     collect_shap_background,
+    make_deletion_baseline
 )
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 DATA_DIR    = "./DATA/Cat_dog_splitted/"
-MODEL_PATH  = "./models/model_kernel=[5,9,15]_32_3_512_1_wd0.0001_do0.0.pth"
-OUT_PATH    = "./models/finetuned_fidelity_k=[5,9,15]_32_3_512_1_wd0.0001_do0.0.pth"
+MODEL_PATH  = "./models/model_kernel=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
+OUT_PATH    = "./models/finetuned/finetuned_fidelity_k=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
 
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Fine-tuning schedule
-LR              = 1e-4      # lower than normal training — we're fine-tuning
+LR              = 7e-5      # lower than normal training — we're fine-tuning
 EPOCHS          = 20
-BATCH_SIZE      = 64
-EARLY_STOP_PAT  = 5
+BATCH_SIZE      = 256
+EARLY_STOP_PAT  = 10
 
 # Fidelity loss settings
-ALPHA               = 0.2   # weight of the fidelity term  (0 = pure BCE, 1 = pure fidelity)
-FIDELITY_BATCH_SIZE = 32     # number of images used for the insertion AUC gradient each epoch
+ALPHA               = 0.8   # weight of the fidelity term  (0 = pure BCE, 1 = pure fidelity)
+FIDELITY_BATCH_SIZE = 16     # number of images used for the insertion AUC gradient each epoch
 INSERTION_STEPS     = 30    # number of masking steps in the differentiable insertion curve
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 class EarlyStopping:
-    def __init__(self, patience: int = 5, min_delta: float = 1e-4):
+    def __init__(self, patience: int = 5, min_delta: float = 1e-6):
         self.patience   = patience
         self.min_delta  = min_delta
-        self.best_acc   = -1.0
+        self.best_ins_auc   = -1.0
         self.best_state = None
         self.counter    = 0
 
-    def step(self, val_acc: float, model: nn.Module) -> bool:
-        if val_acc > self.best_acc + self.min_delta:
-            self.best_acc   = val_acc
+    def step(self, val_ins_auc: float, model: nn.Module) -> bool:
+        if val_ins_auc > self.best_ins_auc + self.min_delta:
+            self.best_ins_auc   = val_ins_auc
             self.best_state = copy.deepcopy(model.state_dict())
             self.counter    = 0
         else:
@@ -135,7 +136,7 @@ def compute_shap_saliency(
 
     explainer = shap.DeepExplainer(wrapped, background.cpu())
 
-    x = img.unsqueeze(0)
+    x = image.unsqueeze(0)
     shap_vals = explainer.shap_values(x)
 
     if isinstance(shap_vals, list):
@@ -194,6 +195,9 @@ def differentiable_insertion_auc(
     ranked_t = torch.from_numpy(ranked).long()           
 
     ranked_t = ranked_t.clamp(0, n_features - 1)
+
+    baseline = make_deletion_baseline(image).to(device)
+
 
     scores = []
     for step in range(steps + 1):
@@ -277,8 +281,7 @@ def finetune_one_epoch(
     epochs: int,
     model: nn.Module,
     train_loader: DataLoader,
-    fidelity_images: list[torch.Tensor],
-    fidelity_labels: list[int],
+    val_dataset,
     background: torch.Tensor,
     criterion: nn.Module,
     optimizer: optim.Optimizer,
@@ -286,7 +289,7 @@ def finetune_one_epoch(
     alpha: float,
     insertion_steps: int,
     device: torch.device,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     """One fine-tuning epoch.  Returns (avg_total_loss, avg_bce, avg_fid, train_acc).
 
     The epoch has two phases:
@@ -339,24 +342,40 @@ def finetune_one_epoch(
     # ── Phase B: fidelity loss gradient step ─────────────────────────────────
     # We do a single backward on the mean fidelity loss across the fidelity batch.
     t0 = time.perf_counter()
-    print(f"  Computing SHAP + insertion AUC for {len(fidelity_images)} images …", end=" ", flush=True)
 
-    optimizer.zero_grad(set_to_none=True)
-    fid_loss = compute_fidelity_loss(
-        model, fidelity_images, fidelity_labels,
-        background, insertion_steps, device,
-    )
-    fid_term = alpha * fid_loss
-    scaler.scale(fid_term).backward()
-    scaler.step(optimizer)
-    scaler.update()
+    for _ in range(2):
+        rng_idxs = torch.randperm(len(val_dataset))[:FIDELITY_BATCH_SIZE * 4].tolist()
+        fidelity_images: list[torch.Tensor] = []
+        fidelity_labels: list[int] = []
+        for idx in rng_idxs:
+            sample = val_dataset[idx]
+            if sample is None:
+                continue
+            img, lbl, _ = sample
+            fidelity_images.append(img.float()) 
+            fidelity_labels.append(int(lbl))
+            if len(fidelity_images) == FIDELITY_BATCH_SIZE:
+                break
+        print(f"  Fidelity batch ready: {len(fidelity_images)} images, "
+            f"labels={fidelity_labels}")
+        optimizer.zero_grad(set_to_none=True)
+        print(f"  Computing SHAP + insertion AUC for {len(fidelity_images)} images …", end=" ", flush=True)
+        fid_loss = compute_fidelity_loss(
+            model, fidelity_images, fidelity_labels,
+            background, insertion_steps, device,
+        )
+        fid_term = alpha * fid_loss
+        scaler.scale(fid_term).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-    elapsed = time.perf_counter() - t0
-    avg_fid = fid_loss.item()
-    print(f"done in {elapsed:.1f}s  |  fidelity_loss={avg_fid:.4f}  ins_AUC≈{1-avg_fid:.4f}")
+        elapsed = time.perf_counter() - t0
+        avg_fid = fid_loss.item()
+        print(f"done in {elapsed:.1f}s  |  fidelity_loss={avg_fid:.4f}  ins_AUC≈{1-avg_fid:.4f}")
 
     avg_total = (1.0 - alpha) * avg_bce + alpha * avg_fid
-    return avg_total, avg_bce, avg_fid, train_acc
+    avg_ins_auc = 1.0 - fid_loss.item()
+    return avg_total, avg_bce, avg_fid, train_acc, avg_ins_auc
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -369,7 +388,7 @@ if __name__ == "__main__":
     print(f"Insertion steps     : {INSERTION_STEPS}")
 
     # ── Load datasets ─────────────────────────────────────────────────────────
-    train_loader, val_loader, test_dataset, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
+    train_loader, val_loader, test_loader, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
 
     train_dataset = SafeImageFolder(
         os.path.join(DATA_DIR, "train"), transform=get_tensor_transform()
@@ -388,7 +407,7 @@ if __name__ == "__main__":
     )
     
 
-    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 15, 32, 3, 512, 1
+    KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 15, 32, 3, 64, 1
     model = I_HAVE_A_THEORY(KERNEL_SIZE, CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict)
@@ -404,27 +423,13 @@ if __name__ == "__main__":
     print(f"{'='*65}\n")
 
     for epoch in range(EPOCHS):
-        rng_idxs = torch.randperm(len(val_dataset))[:FIDELITY_BATCH_SIZE * 4].tolist()
-        fidelity_images: list[torch.Tensor] = []
-        fidelity_labels: list[int] = []
-        for idx in rng_idxs:
-            sample = val_dataset[idx]
-            if sample is None:
-                continue
-            img, lbl, _ = sample
-            fidelity_images.append(img.float()) 
-            fidelity_labels.append(int(lbl))
-            if len(fidelity_images) == FIDELITY_BATCH_SIZE:
-                break
-        print(f"  Fidelity batch ready: {len(fidelity_images)} images, "
-            f"labels={fidelity_labels}")
-        avg_total, avg_bce, avg_fid, train_acc = finetune_one_epoch(
+        
+        avg_total, avg_bce, avg_fid, train_acc, avg_ins_auc = finetune_one_epoch(
             epoch=epoch,
             epochs=EPOCHS,
             model=model,
             train_loader=train_loader,
-            fidelity_images=fidelity_images,
-            fidelity_labels=fidelity_labels,
+            val_dataset=val_dataset,
             background=background,
             criterion=criterion,
             optimizer=optimizer,
@@ -443,11 +448,19 @@ if __name__ == "__main__":
             f"total={avg_total:.4f}  bce={avg_bce:.4f}  fid={avg_fid:.4f} | "
             f"train_acc={train_acc:.4f}  val_acc={val_acc:.4f}  gap={gap:+.4f}{overfit_flag}"
         )
+        with open(f"./models/finetuned_all_steps/traceback.txt",'a') as f:
+            f.write(
+            f"  Epoch {epoch+1:>3}/{EPOCHS} | "
+            f"total={avg_total:.4f}  bce={avg_bce:.4f}  fid={avg_fid:.4f} | "
+            f"train_acc={train_acc:.4f}  val_acc={val_acc:.4f}  gap={gap:+.4f}{overfit_flag}"
+        )
 
-        torch.save(model.state_dict(), OUT_PATH)
+        OUT_PATH_epoch = f"./models/finetuned_all_steps/epoch{epoch+1}/finetuned_fidelity_k=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
+        os.mkdir(f"./models/finetuned_all_steps/epoch{epoch+1}")
+        torch.save(model.state_dict(), OUT_PATH_epoch)
 
-        if early_stop.step(val_acc, model):
-            print(f"\n  Early stopping, best val_acc={early_stop.best_acc:.4f}")
+        if early_stop.step(avg_ins_auc, model):
+            print(f"\n  Early stopping, best ins_auc={early_stop.best_ins_auc:.4f}")
             break
 
     early_stop.restore_best(model)
