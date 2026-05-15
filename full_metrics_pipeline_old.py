@@ -20,12 +20,7 @@ from Grad_cam_visual import find_last_conv_layer
 from captum.metrics import infidelity
 import shap
 import re
-from torchvision.transforms import functional as TF
 
-DELETION_BASELINE = "blur"   # "black", "blur", or "mean"
-
-BLUR_KERNEL_SIZE = 61
-BLUR_SIGMA = 20.0
 
 class ShapBinaryWrapper(torch.nn.Module):
     """Wraps a model for use with shap.DeepExplainer.
@@ -195,7 +190,7 @@ class Explainer:
         return dispatch[self.method](image_tensor, label)
 
 
-    def _gradcam_raw(self, img: torch.Tensor,label: int) -> np.ndarray:
+    def _gradcam_raw(self, img: torch.Tensor) -> np.ndarray:
         """Shared GradCAM forward/backward pass, returns raw upsampled CAM.
 
         Backpropagates on the raw model output (scalar logit for binary models,
@@ -204,7 +199,6 @@ class Explainer:
 
         Args:
             img: Image tensor (C, H, W), already on the correct device.
-            label: Ground-truth (or predicted) class index.
 
         Returns:
             Raw float32 CAM of shape (H, W), ReLU-ed but NOT normalised.
@@ -217,9 +211,6 @@ class Explainer:
             score = out.squeeze()
         else:
             score = out[0].max()
-        
-        prob = torch.sigmoid(score)
-        score = prob if label == 1 else (1.0 - prob)
         score.backward()
 
         weights = self._gradients.mean(dim=(2, 3), keepdim=True)  # (1, C, 1, 1)
@@ -266,7 +257,7 @@ class Explainer:
         Returns:
             Saliency map (C, H, W), values in [0, 1], identical across channels.
         """
-        raw = self._gradcam_raw(img.to(self.device),label)          # (H, W)
+        raw = self._gradcam_raw(img.to(self.device))          # (H, W)
         normalised_hw = _normalise(raw)                        # (H, W)
         C = img.shape[0]
         return np.stack([normalised_hw] * C, axis=0)           # (C, H, W)
@@ -286,11 +277,13 @@ class Explainer:
             symmetrically normalised by the global max absolute value across
             all channels.
         """
+
         wrapped = ShapBinaryWrapper(
             self.model,
             explain_probability=self.config.shap_explain_probability
         ).to(self.device).eval()
 
+        # Use provided background or fall back to a single zero-image baseline
         if self.config.shap_background is not None:
             background = self.config.shap_background.to(self.device)
         else:
@@ -303,24 +296,22 @@ class Explainer:
         if isinstance(shap_vals, list):
             shap_vals = shap_vals[0]
 
-        shap_arr = np.array(shap_vals)
+        shap_arr = np.array(shap_vals)  # (1, C, H, W) or (1, H, W, C)
 
+        # Normalise axis order to (1, C, H, W)
         if shap_arr.ndim == 5 and shap_arr.shape[-1] == 1:
             shap_arr = shap_arr[..., 0]
         if shap_arr.ndim == 4 and shap_arr.shape[-1] in [1, 3]:
+            # (1, H, W, C) → (1, C, H, W)
             shap_arr = np.transpose(shap_arr, (0, 3, 1, 2))
 
+        # shap_arr[0] is now (C, H, W)
         chw = shap_arr[0].astype(np.float32)
 
-        # For label 0 (cat), the model output is the dog score.
-        # Negative SHAP values = evidence for cat, so flip the sign
-        # so that "most important for the true class" always sorts correctly.
-        if label == 0:
-            chw = -chw
-
+        # Symmetric normalisation by global max-abs so range is [-1, 1] (whe rank based on abs were needed)
         max_abs = np.max(np.abs(chw)) + 1e-8
-        return chw / max_abs  # (C, H, W)
-    
+        return (chw / max_abs)  # (C, H, W)
+
     def shap_raw_values(self, img: torch.Tensor) -> np.ndarray:
         """Return raw per-channel SHAP values without normalisation.
 
@@ -354,46 +345,7 @@ class Explainer:
         if arr.ndim == 4 and arr.shape[1] in [1, 3]:
             arr = np.transpose(arr, (0, 2, 3, 1))
         return arr[0]  # (H, W, C)
-    
-def make_deletion_baseline(
-    image: torch.Tensor,
-    method: str = DELETION_BASELINE,
-) -> torch.Tensor:
-    """
-    Creates the baseline used to replace deleted pixels.
 
-    Options:
-        "black": deleted pixels become 0.
-        "blur": deleted pixels become Gaussian-blurred pixels.
-        "mean": deleted pixels become the image's mean RGB value.
-    """
-    method = method.lower()
-
-    if method == "black":
-        return torch.zeros_like(image)
-
-    if method == "blur":
-        kernel_size = BLUR_KERNEL_SIZE
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        return TF.gaussian_blur(
-            image,
-            kernel_size=[kernel_size, kernel_size],
-            sigma=[BLUR_SIGMA, BLUR_SIGMA],
-        )
-
-    if method == "mean":
-        # Per-channel mean: one average value for R, G, B separately.
-        # Shape: (C, 1, 1), broadcast to (C, H, W)
-        mean_rgb = image.mean(dim=(1, 2), keepdim=True)
-        return mean_rgb.expand_as(image)
-
-    raise ValueError(
-        f"Unknown DELETION_BASELINE='{method}'. "
-        "Choose from: 'black', 'blur', 'mean'."
-    )
-    
 def _fidelity_curve(
     model: torch.nn.Module,
     image: torch.Tensor,
@@ -403,31 +355,46 @@ def _fidelity_curve(
     device: torch.device,
     mode: str,          # "insertion" or "deletion"
 ) -> torch.Tensor:
+    """Core pixel-masking loop shared by insertion and deletion AUC.
+ 
+    Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
+    of class scores, one per masking step.
+ 
+    For *insertion*: starts from an all-zero image and progressively reveals
+    the most important pixels.  Score should rise quickly → high AUC is good.
+ 
+    For *deletion*: starts from the full image and progressively removes the
+    most important pixels.  Score should fall quickly → low AUC is good.
+ 
+    Args:
+        model:   PyTorch model already on `device`, will be put in eval mode.
+        image:   Single image tensor (C, H, W) on `device`.
+        ranked:  1-D int array of pixel indices sorted most-to-least important,
+                 length H*W.  Comes from argsort(saliency.flatten())[::-1].
+        label:   Ground-truth class index (0 or 1).
+        steps:   Number of masking steps (curve resolution).
+        device:  Torch device.
+        mode:    "insertion" or "deletion".
+ 
+    Returns:
+        1-D float tensor of shape (steps+1,) with values in [0, 1].
+    """
     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
 
     C, H, W = image.shape
     n_features = C * H * W
 
+    # Guard: saliency must have been computed for the same spatial size
     if len(ranked) != n_features:
         raise ValueError(
             f"ranked has {len(ranked)} entries but image has {n_features} pixels "
             f"({H}x{W}). Saliency map spatial size must match the image."
         )
 
-    image = image.to(device)
-
-    # New baseline: blurred image instead of black/zero image
-    baseline = gaussian_blur_baseline(
-        image,
-        kernel_size=31,
-        sigma=10.0,
-    ).to(device)
-
     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
-    ranked_t = ranked_t.clamp(0, n_features - 1)
 
-    image = image.to(device)
-    baseline = make_deletion_baseline(image).to(device)
+    # Safety clamp: catches any remaining off-by-one issues
+    ranked_t = ranked_t.clamp(0, n_features - 1)
 
     scores = []
     model.eval()
@@ -436,19 +403,16 @@ def _fidelity_curve(
             n_top = int(step / steps * n_features)
 
             if mode == "insertion":
-                # Start from blurred image, reveal important original pixels
                 mask = torch.zeros(n_features, device=device)
                 if n_top > 0:
                     mask[ranked_t[:n_top]] = 1.0
-            else:
-                # Start from original image, replace important pixels with blur
+            else:  # deletion
                 mask = torch.ones(n_features, device=device)
                 if n_top > 0:
                     mask[ranked_t[:n_top]] = 0.0
 
-            mask = mask.view(C, H, W)
-
-            masked = image * mask + baseline * (1.0 - mask)
+            mask   = mask.view(C, H, W)
+            masked = image * mask
 
             logit = model(masked.unsqueeze(0))
             prob  = torch.sigmoid(logit).squeeze()
@@ -456,107 +420,6 @@ def _fidelity_curve(
             scores.append(score)
 
     return torch.stack(scores)
-
-# def _fidelity_curve(
-#     model: torch.nn.Module,
-#     image: torch.Tensor,
-#     ranked: np.ndarray,
-#     label: int,
-#     steps: int,
-#     device: torch.device,
-#     mode: str,          # "insertion" or "deletion"
-# ) -> torch.Tensor:
-#     """Core pixel-masking loop shared by insertion and deletion AUC.
- 
-#     Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
-#     of class scores, one per masking step.
- 
-#     For *insertion*: starts from an all-zero image and progressively reveals
-#     the most important pixels.  Score should rise quickly → high AUC is good.
- 
-#     For *deletion*: starts from the full image and progressively removes the
-#     most important pixels.  Score should fall quickly → low AUC is good.
- 
-#     Args:
-#         model:   PyTorch model already on `device`, will be put in eval mode.
-#         image:   Single image tensor (C, H, W) on `device`.
-#         ranked:  1-D int array of pixel indices sorted most-to-least important,
-#                  length H*W.  Comes from argsort(saliency.flatten())[::-1].
-#         label:   Ground-truth class index (0 or 1).
-#         steps:   Number of masking steps (curve resolution).
-#         device:  Torch device.
-#         mode:    "insertion" or "deletion".
- 
-#     Returns:
-#         1-D float tensor of shape (steps+1,) with values in [0, 1].
-#     """
-#     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
-
-#     C, H, W = image.shape
-#     n_features = C * H * W
-
-#     # Guard: saliency must have been computed for the same spatial size
-#     if len(ranked) != n_features:
-#         raise ValueError(
-#             f"ranked has {len(ranked)} entries but image has {n_features} pixels "
-#             f"({H}x{W}). Saliency map spatial size must match the image."
-#         )
-
-#     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
-
-#     # Safety clamp: catches any remaining off-by-one issues
-#     ranked_t = ranked_t.clamp(0, n_features - 1)
-
-#     scores = []
-#     model.eval()
-#     with torch.no_grad():
-#         for step in range(steps + 1):
-#             n_top = int(step / steps * n_features)
-
-#             if mode == "insertion":
-#                 mask = torch.zeros(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 1.0
-#             else:  # deletion
-#                 mask = torch.ones(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 0.0
-
-#             mask   = mask.view(C, H, W)
-#             # masked = image * mask
-#             masked = image * mask + blurred_image * (1.0 - mask)
-
-#             logit = model(masked.unsqueeze(0))
-#             prob  = torch.sigmoid(logit).squeeze()
-#             score = prob if label == 1 else (1.0 - prob)
-#             scores.append(score)
-
-#     return torch.stack(scores)
-
-def gaussian_blur_baseline(
-    image: torch.Tensor,
-    kernel_size: int = 61,
-    sigma: float = 20.0,
-) -> torch.Tensor:
-    """
-    Creates a blurred version of the image to use as deletion/insertion baseline.
-
-    Args:
-        image: Tensor of shape (C, H, W), values in [0, 1].
-        kernel_size: Gaussian blur kernel size. Must be odd.
-        sigma: Blur strength.
-
-    Returns:
-        Blurred image tensor of shape (C, H, W).
-    """
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-
-    return TF.gaussian_blur(
-        image,
-        kernel_size=[kernel_size, kernel_size],
-        sigma=[sigma, sigma],
-    )
 
 def compute_fidelity(
     model: torch.nn.Module,
@@ -602,23 +465,23 @@ def compute_fidelity(
     ins_auc = float(torch.trapezoid(ins_scores, xs).item())
  
     # DEBUG plot
-    xs_np  = xs.cpu().numpy()
-    del_np = del_scores.cpu().numpy()
-    ins_np = ins_scores.cpu().numpy()
+    #xs_np  = xs.cpu().numpy()
+    #del_np = del_scores.cpu().numpy()
+    #ins_np = ins_scores.cpu().numpy()
  
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    ax1.plot(xs_np, del_np)
-    ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
-    ax1.set_xlabel("Fraction of pixels removed")
-    ax1.set_ylabel("Model score")
-    ax2.plot(xs_np, ins_np)
-    ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
-    ax2.set_xlabel("Fraction of pixels revealed")
-    ax2.set_ylabel("Model score")
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path)
-    plt.close(fig)
+    #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    #ax1.plot(xs_np, del_np)
+    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
+    #ax1.set_xlabel("Fraction of pixels removed")
+    #ax1.set_ylabel("Model score")
+    #ax2.plot(xs_np, ins_np)
+    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
+    #ax2.set_xlabel("Fraction of pixels revealed")
+    #ax2.set_ylabel("Model score")
+    #fig.tight_layout()
+    #os.makedirs(os.path.dirname(path), exist_ok=True)
+    #fig.savefig(path)
+    #plt.close(fig)
     # DEBUG plot
 
     return del_auc, ins_auc
@@ -1237,110 +1100,6 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "model_test_f1": round(res.model_test_f1, 6),
             })
     print(f"  Saved: {save_path}")
-def load_correct_samples(
-    dataset: Dataset,
-    model: torch.nn.Module,
-    n_samples: int,
-    batch_size: int,
-    device: torch.device,
-) -> tuple[list[torch.Tensor], list[int]]:
-    """Draw n_samples from a Dataset where the model predicts correctly,
-    with equal class balance (n_samples // 2 per class).
-
-    Args:
-        dataset: PyTorch Dataset with a .targets attribute, returning (image_tensor, label, path).
-        model: PyTorch model in eval mode.
-        n_samples: Total number of correctly classified samples. Must be even.
-        batch_size: DataLoader batch size.
-        device: Torch device.
-
-    Returns:
-        Tuple of (list of image tensors, list of integer labels), interleaved by class.
-    """
-    if not hasattr(dataset, "targets"):
-        raise AttributeError("Dataset must have a .targets attribute.")
-
-    n_per_class = n_samples // 2
-
-    # Separate shuffled indices by class upfront
-    class_to_idxs: dict[int, list[int]] = defaultdict(list)
-    shuffled = torch.randperm(len(dataset)).tolist()
-    for idx in shuffled:
-        class_to_idxs[int(dataset.targets[idx])].append(idx)
-
-    classes = sorted(class_to_idxs.keys())[:2]  # only class 0 and 1
-
-    images: dict[int, list[torch.Tensor]] = {c: [] for c in classes}
-    labels: dict[int, list[int]]          = {c: [] for c in classes}
-
-    model.eval()
-
-    # Process each class independently so we hit n_per_class for both
-    for cls in classes:
-        idxs = class_to_idxs[cls]
-        loader = DataLoader(
-            Subset(dataset, idxs),
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_skip_none,
-        )
-
-        with torch.no_grad():
-            for imgs, lbls, _ in loader:
-                imgs = imgs.float().to(device)
-
-                logits = model(imgs)
-                probs  = torch.sigmoid(logits).squeeze(-1)
-                preds  = (probs >= 0.5).long()
-
-                for img, lbl, pred in zip(imgs, lbls, preds):
-                    if pred.item() == lbl.item():
-                        images[cls].append(img.cpu())
-                        labels[cls].append(int(lbl.item()))
-
-                    if len(images[cls]) >= n_per_class:
-                        break
-
-                if len(images[cls]) >= n_per_class:
-                    break
-
-        found = len(images[cls])
-        if found < n_per_class:
-            print(f"  Warning: class {cls} only yielded {found} correct samples "
-                  f"(requested {n_per_class}).")
-        else:
-            print(f"  Class {cls}: collected {found} correctly classified samples.")
-
-    # Interleave classes so the sample list isn't class-sorted
-    out_images, out_labels = [], []
-    for img0, lbl0, img1, lbl1 in zip(
-        images[classes[0]], labels[classes[0]],
-        images[classes[1]], labels[classes[1]],
-    ):
-        out_images += [img0, img1]
-        out_labels += [lbl0, lbl1]
-    
-    # Extract numeric IDs from filenames for reproducibility reporting
-    nums_by_class: dict[str, list[int]] = {}
-    for cls in classes:
-        class_name = dataset.classes[cls]
-
-        # Walk the subset loader indices back to original dataset paths
-        nums = []
-        collected = 0
-        for idx in class_to_idxs[cls]:
-            if collected >= len(images[cls]):
-                break
-            path, _ = dataset.samples[idx]
-            match = re.search(r"(\d+)", os.path.basename(path))
-            if match:
-                nums.append(int(match.group(1)))
-            collected += 1
-
-        nums_by_class[class_name] = nums
-        print(f"  {class_name}_nums = {nums}")
-
-    return out_images, out_labels, nums_by_class
 
 
 def load_samples(
@@ -1492,21 +1251,7 @@ def run_pipeline(
     print(f"{'='*60}")
 
 
-    # images, labels = load_samples(dataset, config.n_samples, config.batch_size)
-    
-    # Loading correct samples
-    device = torch.device(config.device)
-    images, labels, sample_nums = load_correct_samples(
-        dataset, model, config.n_samples, config.batch_size, device
-    )
-
-    # Save the sampled image numbers for reproducibility
-    nums_path = os.path.join(config.output_dir, "sampled_image_nums.txt")
-    with open(nums_path, "w") as _f:
-        for class_name, nums in sample_nums.items():
-            _f.write(f"{class_name}_nums = {nums}\n")
-    print(f"  Saved: {nums_path}")
-    
+    images, labels = load_samples(dataset, config.n_samples, config.batch_size)
     all_results: dict[str, MetricResults] = {}
     all_saliency: dict[str, list[np.ndarray]] = {}
 
@@ -1723,7 +1468,7 @@ if __name__ == "__main__":
 
     shap_background = collect_shap_background(train_dataset,50,25)
     
-    MODELS_DIR = "models/to_test"
+    MODELS_DIR = "models/finetuned"
 
     all_pth_files = sorted(
         f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")
@@ -1748,7 +1493,7 @@ if __name__ == "__main__":
     for fname, hp in matched_models:
         model_path = os.path.join(MODELS_DIR, fname)
  
-        output_dir = f"./finetuning/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
+        output_dir = f"./interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
  
         # Skip already-completed runs (CSV written as the last step)
         csv_path = os.path.join(output_dir, "metrics_summary.csv")
@@ -1773,8 +1518,7 @@ if __name__ == "__main__":
             dropout_rate  = hp["dropout"],
         ).to(DEVICE)
         state_dict = torch.load(model_path, map_location=DEVICE)
-        
-        model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict)
         model.eval()
         #except Exception as exc:
         #    print(f"  [ERROR] Could not load model {fname}: {exc}")
@@ -1788,7 +1532,7 @@ if __name__ == "__main__":
             batch_size             = 32,
             device                 = "cuda" if torch.cuda.is_available() else "cpu",
             output_dir             = output_dir,
-            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 features per step
+            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 curve points
             stability_n_perturbations = 5,
             stability_noise_std    = 0.05,
             separability_n_pairs   = 20,
