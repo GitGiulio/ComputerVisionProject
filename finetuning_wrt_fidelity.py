@@ -1,7 +1,9 @@
 """
+@author: Giulio Lo Cigno
 Fine-tunes a pre-trained I_HAVE_A_THEORY model with a combined loss:
 
-    L = (1 - alpha) * BCE_loss  +  alpha * (1 - insertion_AUC)
+    L1 = (1 - alpha) * BCE_loss # applied once per batch, as usual
+    L2 =  alpha * (1 - insertion_AUC) # applied twice per epoch, due to computational contraints
 
 The insertion AUC term is computed on a small fixed fidelity batch once per
 epoch, using SHAP attributions as a fixed pixel-ranking signal.
@@ -36,8 +38,6 @@ from full_metrics_pipeline import (
     make_deletion_baseline
 )
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-
 DATA_DIR    = "./DATA/Cat_dog_splitted/"
 MODEL_PATH  = "./models/model_kernel=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
 OUT_PATH    = "./models/finetuned/finetuned_fidelity_k=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
@@ -45,19 +45,17 @@ OUT_PATH    = "./models/finetuned/finetuned_fidelity_k=[5,9,15]_32_3_64_1_wd0.00
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Fine-tuning schedule
-LR              = 7e-5      # lower than normal training — we're fine-tuning
+LR              = 7e-5      # lower than normal training, we're fine-tuning
 EPOCHS          = 20
 BATCH_SIZE      = 256
 EARLY_STOP_PAT  = 10
 
 # Fidelity loss settings
-ALPHA               = 0.8   # weight of the fidelity term  (0 = pure BCE, 1 = pure fidelity)
-FIDELITY_BATCH_SIZE = 16     # number of images used for the insertion AUC gradient each epoch
-INSERTION_STEPS     = 30    # number of masking steps in the differentiable insertion curve
+ALPHA               = 0.8   # weight of the fidelity term  (0 = pure BCE, 1 = pure fidelity) NOTE that BCE is applied many more times, so alpha should be quite high
+FIDELITY_BATCH_SIZE = 16     # number of images used for the insertion AUC gradient, twice each epoch
+INSERTION_STEPS     = 30    # number of masking steps in the differentiable insertion curve NOTE increasing this value increases linearly the dimention of computational graph in VRAM for a single image
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-class EarlyStopping:
+class EarlyStopping: # NOTE modified to be based on the insertion_AUC and not val_accuracy
     def __init__(self, patience: int = 5, min_delta: float = 1e-6):
         self.patience   = patience
         self.min_delta  = min_delta
@@ -116,9 +114,7 @@ def compute_shap_saliency(
     """Run SHAP DeepExplainer and return a (H, W) saliency map.
 
     The map is the absolute-value sum across colour channels, normalised to
-    [0, 1].  We take the absolute value because the insertion metric only
-    needs a pixel *ranking*, not signed attribution values — we want to reveal
-    the pixels that the model cares about most, regardless of direction.
+    [-1, 1].
 
     Args:
         model: The model to explain, in eval mode.
@@ -127,7 +123,7 @@ def compute_shap_saliency(
         explain_probability: If True, wrap model with sigmoid for SHAP.
 
     Returns:
-        Normalised saliency map (H, W) with values in [0, 1].
+        Normalised saliency map (C, H, W) with values in [-1, 1].
     """
     wrapped = ShapBinaryWrapper(
             model.cpu(),
@@ -148,13 +144,13 @@ def compute_shap_saliency(
     if shap_arr.ndim == 5 and shap_arr.shape[-1] == 1:
         shap_arr = shap_arr[..., 0]
     if shap_arr.ndim == 4 and shap_arr.shape[-1] in [1, 3]:
-        # (1, H, W, C) → (1, C, H, W)
+        # (1, H, W, C) -> (1, C, H, W)
         shap_arr = np.transpose(shap_arr, (0, 3, 1, 2))
 
     # shap_arr[0] is now (C, H, W)
     chw = shap_arr[0].astype(np.float32)
 
-    # Symmetric normalisation by global max-abs so range is [-1, 1] (whe rank based on abs were needed)
+    # Symmetric normalisation by global max-abs so range is [-1, 1]
     max_abs = np.max(np.abs(chw)) + 1e-8
     return (chw / max_abs).astype(np.float32)  # (C, H, W)
 
@@ -180,9 +176,9 @@ def differentiable_insertion_auc(
     Args:
         model: Model in train mode (gradients will flow through it).
         image: Single image (C, H, W) on `device`.
-        saliency: Numpy array (H, W) — pixel ranking, detached from graph.
+        saliency: Numpy array (H, W), pixel ranking, detached from graph.
         label: Ground-truth class index (0 or 1).
-        steps: Number of masking steps (more = smoother AUC, slower).
+        steps: Number of masking steps (more = smoother AUC, slower and needs more VRAM).
         device: Torch device.
 
     Returns:
@@ -209,8 +205,8 @@ def differentiable_insertion_auc(
             mask[ranked_t[:n_revealed].to(device)] = 1.0
         mask = mask.view(C, H, W)                         # (1, H, W) for broadcast
 
-        # Revealed image: top pixels shown, rest stay at zero baseline
-        revealed = image * mask                            # (C, H, W) differentiable
+        # Revealed image: top pixels shown, rest stay at baseline
+        revealed = image * mask + baseline * (1.0 - mask)  # (C, H, W) differentiable
 
         logit = model(revealed.unsqueeze(0))               # (1, 1)
         prob  = torch.sigmoid(logit).squeeze()             # scalar
@@ -219,7 +215,7 @@ def differentiable_insertion_auc(
         score = prob if label == 1 else (1.0 - prob)
         scores.append(score)
 
-    # Stack into (steps+1,) tensor and integrate — differentiable all the way
+    # Stack into (steps+1,) tensor and integrate, differentiable all the way
     score_tensor = torch.stack(scores)                     # (steps+1,)
     xs = torch.linspace(0, 1, steps + 1, device=device)
     auc = torch.trapezoid(score_tensor, xs)                # scalar tensor
@@ -269,12 +265,10 @@ def compute_fidelity_loss(
             model, img_dev, saliency, label, steps, device
         )
 
-        fidelity_losses.append(1.0 - ins_auc)   # minimise → maximise AUC
+        fidelity_losses.append(1.0 - ins_auc)   # minimise -> maximise AUC
 
     return torch.stack(fidelity_losses).mean()
 
-
-# ── Fine-tuning epoch ─────────────────────────────────────────────────────────
 
 def finetune_one_epoch(
     epoch: int,
@@ -294,11 +288,10 @@ def finetune_one_epoch(
 
     The epoch has two phases:
 
-    Phase A — normal mini-batch SGD over the full training set (BCE loss).
-    Phase B — one gradient step using only the fidelity loss on the fixed
-              fidelity batch.  We do a *separate* backward pass so the
-              expensive SHAP computation happens only once per epoch, not
-              once per mini-batch.
+    Phase A, normal mini-batch SGD over the full training set (BCE loss).
+    Phase B, two gradient step using only the fidelity loss on the fidelity batch.
+              We do a *separate* backward pass so the expensive SHAP computation happens only once per epoch,
+              not once per mini-batch.
 
     Both phases use the same optimizer, so the parameter updates from both
     loss terms accumulate within the same epoch.  Phase A runs first so the
@@ -344,6 +337,10 @@ def finetune_one_epoch(
     t0 = time.perf_counter()
 
     for _ in range(2):
+        # We draw a small random subset of the validation set so the fidelity signal
+        # is independent of the training data, this avoids overfitting the fidelity
+        # term to training images the model has already memorized.
+        print(f"\nSampling {FIDELITY_BATCH_SIZE} validation images for fidelity batch …")
         rng_idxs = torch.randperm(len(val_dataset))[:FIDELITY_BATCH_SIZE * 4].tolist()
         fidelity_images: list[torch.Tensor] = []
         fidelity_labels: list[int] = []
@@ -378,8 +375,6 @@ def finetune_one_epoch(
     return avg_total, avg_bce, avg_fid, train_acc, avg_ins_auc
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
 
     print(f"Device : {DEVICE}")
@@ -387,7 +382,6 @@ if __name__ == "__main__":
     print(f"Fidelity batch size : {FIDELITY_BATCH_SIZE}")
     print(f"Insertion steps     : {INSERTION_STEPS}")
 
-    # ── Load datasets ─────────────────────────────────────────────────────────
     train_loader, val_loader, test_loader, idx_to_class = data_loaders(DEVICE, BATCH_SIZE)
 
     train_dataset = SafeImageFolder(
@@ -398,14 +392,9 @@ if __name__ == "__main__":
     background = collect_shap_background(train_dataset, n_background=50,
                                          batch_size=25) 
 
-    # We draw a small random subset of the validation set so the fidelity signal
-    # is independent of the training data, this avoids overfitting the fidelity
-    # term to training images the model has already memorized.
-    print(f"\nSampling {FIDELITY_BATCH_SIZE} validation images for fidelity batch …")
     val_dataset = SafeImageFolder(
         os.path.join(DATA_DIR, "val"), transform=get_tensor_transform()
     )
-    
 
     KERNEL_SIZE,CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER = 15, 32, 3, 64, 1
     model = I_HAVE_A_THEORY(KERNEL_SIZE, CONV_FILTER, CONV_LAYER, DENSE_NEURON, DENSE_LAYER).to(DEVICE)
@@ -457,7 +446,7 @@ if __name__ == "__main__":
 
         OUT_PATH_epoch = f"./models/finetuned_all_steps/epoch{epoch+1}/finetuned_fidelity_k=[5,9,15]_32_3_64_1_wd0.001_do0.0.pth"
         os.mkdir(f"./models/finetuned_all_steps/epoch{epoch+1}")
-        torch.save(model.state_dict(), OUT_PATH_epoch)
+        torch.save(model.state_dict(), OUT_PATH_epoch) # NOTE I am saving all epochs states in this case, in case I want to further inspect how the learning proceaded.
 
         if early_stop.step(avg_ins_auc, model):
             print(f"\n  Early stopping, best ins_auc={early_stop.best_ins_auc:.4f}")

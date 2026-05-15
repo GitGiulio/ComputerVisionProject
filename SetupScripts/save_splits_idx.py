@@ -1,29 +1,3 @@
-"""
-save_split_indices.py
----------------------
-Reads the existing split structure:
-
-    /Data/Cats_Dogs_Splitted/
-        train/
-            Cat/   *.jpg
-            Dog/   *.jpg
-        val/
-            Cat/   *.jpg
-            Dog/   *.jpg
-        test/
-            Cat/   *.jpg
-            Dog/   *.jpg
-
-and saves 4 index files (one per subset x class) that list the bare
-image numbers (without extension) found in val/ and test/.
-
-Output files (written next to this script, or to --output-dir):
-    val_cats.txt
-    val_dogs.txt
-    test_cats.txt
-    test_dogs.txt
-"""
-
 import argparse
 import os
 
@@ -61,12 +35,10 @@ def main():
     parser.add_argument(
         "--root",
         default="/Data/Cats_Dogs_Splitted",
-        help="Root directory that contains train/, val/, test/ subfolders.",
     )
     parser.add_argument(
         "--output-dir",
         default=".",
-        help="Directory where the 4 index text files will be written.",
     )
     args = parser.parse_args()
 

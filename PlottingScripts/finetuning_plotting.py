@@ -1,14 +1,11 @@
 """
-plot_finetune_comparison.py
+@author: Giulio Lo Cigno
 
 Run this script from inside a model result folder that contains:
   - base.csv       (metrics before finetuning)
   - finetuned.csv  (metrics after finetuning)
 
 Output PNGs are saved to ./finetune_plots/ inside the same folder.
-
-Usage:
-  python plot_finetune_comparison.py
 """
 
 import os
@@ -18,7 +15,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
-# ── Light theme ───────────────────────────────────────────────────────────────
 
 STYLE = {
     "figure.facecolor": "#f7f8fc",
@@ -39,7 +35,6 @@ COLOR_FINETUNED = "#d85a20"   # orange - finetuned model
 COLOR_POSITIVE  = "#1e9e5a"   # green  - improvement annotation
 COLOR_NEGATIVE  = "#d83040"   # red    - regression annotation
 
-# ── Metrics to compare ────────────────────────────────────────────────────────
 # Each entry: (display_title, method_filter, csv_column, y_label, higher_is_better)
 METRICS = [
     ("Test Accuracy",        None,      "model_test_acc", "Accuracy",      True),
@@ -48,8 +43,6 @@ METRICS = [
     ("GradCAM - Insertion AUC", "gradcam", "insertion_auc", "Insertion AUC", True),
     ("GradCAM - Deletion AUC",  "gradcam", "deletion_auc",  "Deletion AUC",  False),
 ]
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -84,8 +77,6 @@ def delta_arrow(delta: float, higher_is_better: bool) -> str:
     improved = delta > 0 if higher_is_better else delta < 0
     return "▲" if improved else "▼"
 
-
-# ── Individual bar-chart comparison ──────────────────────────────────────────
 
 def plot_bar_comparison(
     base_df: pd.DataFrame,
@@ -160,8 +151,6 @@ def plot_bar_comparison(
             plt.close(fig)
         print(f"  saved -> {out}")
 
-
-# ── Summary overview plot ─────────────────────────────────────────────────────
 
 def plot_summary(
     base_df: pd.DataFrame,
@@ -246,8 +235,6 @@ def plot_summary(
     print(f"  saved -> {out}")
 
 
-# ── Radar / spider chart ──────────────────────────────────────────────────────
-
 def plot_radar(
     base_df: pd.DataFrame,
     ft_df: pd.DataFrame,
@@ -269,7 +256,7 @@ def plot_radar(
         if not higher_is_better:
             v_base = 1 - v_base
             v_ft   = 1 - v_ft
-            label  = f"1−{title.split('-')[-1].strip()}\n({title.split('-')[0].strip()})"
+            label  = f"1-{title.split('-')[-1].strip()}\n({title.split('-')[0].strip()})"
         else:
             label = title.replace(" - ", "\n")
         radar_metrics.append((label, v_base, v_ft))
@@ -319,8 +306,6 @@ def plot_radar(
     print(f"  saved -> {out}")
 
 
-# ── Delta waterfall ───────────────────────────────────────────────────────────
-
 def plot_delta_waterfall(
     base_df: pd.DataFrame,
     ft_df: pd.DataFrame,
@@ -328,7 +313,7 @@ def plot_delta_waterfall(
     folder_name: str,
 ) -> None:
     """
-    Horizontal bar chart of absolute deltas (finetuned − base).
+    Horizontal bar chart of absolute deltas (finetuned - base).
     Deletion AUC delta is negated so positive always means improvement.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -371,7 +356,7 @@ def plot_delta_waterfall(
             )
 
         ax.axvline(0, color="#9098b0", linewidth=1.2, zorder=4)
-        ax.set_xlabel("Δ (finetuned − base)  [positive = improvement]", fontsize=10)
+        ax.set_xlabel("Δ (finetuned - base)  [positive = improvement]", fontsize=10)
         ax.set_title(
             f"Improvement Delta - Finetuning\n{folder_name}",
             fontsize=11, fontweight="bold", pad=10,
@@ -385,8 +370,6 @@ def plot_delta_waterfall(
         plt.close(fig)
     print(f"  saved -> {out}")
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     cwd = os.getcwd()

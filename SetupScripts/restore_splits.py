@@ -1,38 +1,9 @@
-"""
-restore_split.py
-----------------
-Reconstructs the train/val/test folder structure from a *flat* source:
-
-    /Data/Cats_Dogs/
-        Cat/   *.jpg   (all images, unsplit)
-        Dog/   *.jpg
-
-using the 4 index files produced by save_split_indices.py:
-
-    val_cats.txt   val_dogs.txt
-    test_cats.txt  test_dogs.txt
-
-Any image whose number is NOT listed in val or test is placed into train/.
-
-Output structure (written to --dest, default: /Data/Cats_Dogs_Restored/):
-    train/Cat/  train/Dog/
-    val/Cat/    val/Dog/
-    test/Cat/   test/Dog/
-
-By default images are COPIED; pass --move to move them instead.
-"""
-
 import argparse
 import os
 import shutil
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp"}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def load_index(path: str) -> set[str]:
     """Load a set of number-strings from a plain-text index file."""
@@ -52,11 +23,6 @@ def transfer(src: str, dst: str, move: bool) -> None:
         shutil.move(src, dst)
     else:
         shutil.copy2(src, dst)
-
-
-# ---------------------------------------------------------------------------
-# Main logic
-# ---------------------------------------------------------------------------
 
 def restore_split(
     source_root: str,
@@ -111,10 +77,6 @@ def restore_split(
     print(f"\nDone. Output written to: {dest_root}")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser(
         description="Restore train/val/test split from flat Cat+Dog folders using index files."
@@ -122,22 +84,18 @@ def main():
     parser.add_argument(
         "--source",
         default="/Data/Cats_Dogs",
-        help="Root folder containing flat Cat/ and Dog/ subfolders (all images, unsplit).",
     )
     parser.add_argument(
         "--dest",
         default="/Data/Cats_Dogs_Restored",
-        help="Destination root where train/, val/, test/ will be created.",
     )
     parser.add_argument(
         "--index-dir",
         default=".",
-        help="Directory that contains val_cats.txt, val_dogs.txt, test_cats.txt, test_dogs.txt.",
     )
     parser.add_argument(
         "--move",
         action="store_true",
-        help="Move files instead of copying them.",
     )
     args = parser.parse_args()
 

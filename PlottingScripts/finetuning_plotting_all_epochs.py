@@ -1,16 +1,14 @@
 """
-plot_finetune_epochs.py
+@author: Giulio Lo Cigno
+variation of finetune_plotting.py
 
 Run this script from inside a model result folder that contains:
-  - base.csv        (metrics before finetuning  → epoch 0)
+  - base.csv        (metrics before finetuning  -> epoch 0)
   - epoch1.csv      (metrics after epoch 1)
   - epoch2.csv      (metrics after epoch 2)
   - ...             (any number of epochs)
 
 Output PNGs are saved to ./epoch_plots/ inside the same folder.
-
-Usage:
-  python plot_finetune_epochs.py
 """
 
 import os
@@ -19,8 +17,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-
-# ── Light theme ───────────────────────────────────────────────────────────────
 
 STYLE = {
     "figure.facecolor": "#f7f8fc",
@@ -36,7 +32,7 @@ STYLE = {
     "font.family":      "sans-serif",
 }
 
-COLOR_BASE     = "#9098b0"   # muted blue-grey – base reference line
+COLOR_BASE     = "#9098b0"   # muted blue-grey - base reference line
 EPOCH_PALETTE  = [           # one colour per metric line in the overview
     "#3a6fd8",
     "#d85a20",
@@ -49,17 +45,15 @@ EPOCH_PALETTE  = [           # one colour per metric line in the overview
 COLOR_IMPROVE  = "#1e9e5a"
 COLOR_REGRESS  = "#d83040"
 
-# ── Metrics ───────────────────────────────────────────────────────────────────
 # (display_title, method_filter, csv_column, y_label, higher_is_better)
 METRICS = [
     ("Test Accuracy",           None,      "model_test_acc", "Accuracy",      True),
-    ("SHAP – Insertion AUC",    "shap",    "insertion_auc",  "Insertion AUC", True),
-    ("SHAP – Deletion AUC",     "shap",    "deletion_auc",   "Deletion AUC",  False),
-    ("GradCAM – Insertion AUC", "gradcam", "insertion_auc",  "Insertion AUC", True),
-    ("GradCAM – Deletion AUC",  "gradcam", "deletion_auc",   "Deletion AUC",  False),
+    ("SHAP - Insertion AUC",    "shap",    "insertion_auc",  "Insertion AUC", True),
+    ("SHAP - Deletion AUC",     "shap",    "deletion_auc",   "Deletion AUC",  False),
+    ("GradCAM - Insertion AUC", "gradcam", "insertion_auc",  "Insertion AUC", True),
+    ("GradCAM - Deletion AUC",  "gradcam", "deletion_auc",   "Deletion AUC",  False),
 ]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -154,8 +148,6 @@ def _x_ticks(ax, xs):
     ax.set_xlim(xs[0] - 0.4, xs[-1] + 0.4)
 
 
-# ── Per-metric line plot ──────────────────────────────────────────────────────
-
 def plot_metric_epoch(
     epochs: list[tuple[int, pd.DataFrame]],
     title: str,
@@ -169,7 +161,7 @@ def plot_metric_epoch(
     xs, ys = build_series(epochs, method, column)
 
     if all(np.isnan(v) for v in ys):
-        print(f"  [skip] {title} – no data")
+        print(f"  [skip] {title} - no data")
         return
 
     color_up = COLOR_IMPROVE if higher_is_better else COLOR_REGRESS
@@ -197,7 +189,7 @@ def plot_metric_epoch(
 
         ax.set_ylabel(y_label, fontsize=10)
         ax.set_title(
-            f"{title}  –  Epoch progression\n"
+            f"{title}  -  Epoch progression\n"
             f"{'↑ higher is better' if higher_is_better else '↓ lower is better'}",
             fontsize=11, fontweight="bold", pad=10,
         )
@@ -226,8 +218,6 @@ def plot_metric_epoch(
         plt.close(fig)
     print(f"  saved -> {output_path}")
 
-
-# ── Overview: all metrics on one figure ──────────────────────────────────────
 
 def plot_overview(
     epochs: list[tuple[int, pd.DataFrame]],
@@ -299,7 +289,7 @@ def plot_overview(
             axes_flat[idx].set_visible(False)
 
         fig.suptitle(
-            f"Finetuning epoch progression – {folder_name}",
+            f"Finetuning epoch progression - {folder_name}",
             fontsize=13, fontweight="bold", y=1.01,
         )
         fig.tight_layout()
@@ -308,8 +298,6 @@ def plot_overview(
         plt.close(fig)
     print(f"  saved -> {output_path}")
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     cwd         = os.getcwd()
@@ -328,7 +316,7 @@ def main():
         color    = EPOCH_PALETTE[idx % len(EPOCH_PALETTE)]
         safe     = (title.lower()
                         .replace(" ", "_")
-                        .replace("–", "")
+                        .replace("-", "")
                         .replace("__", "_")
                         .strip("_"))
         out_path = os.path.join(output_dir, f"epoch_{safe}.png")

@@ -1,3 +1,8 @@
+"""
+@author: Giulio Lo Cigno
+
+This file contains an old implementation of GradCam, but some functions are still used from the current code, so is still necessary
+"""
 import os
 import sys
 import torch

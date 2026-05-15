@@ -1,3 +1,9 @@
+"""
+@author: Giulio Lo Cigno
+
+This is the code for training the models
+NOTE: not the full hyperparam space was ever actually executed, we changed the code slightly to start the trainings for the only models we wanted to train
+"""
 import os
 import sys
 import copy

@@ -1,5 +1,5 @@
 """
-plot_model_metrics.py
+@author: Giulio Lo Cigno
 
 Generates metric comparison plots across models from interpretability result folders.
 Folder naming convention:
@@ -9,9 +9,6 @@ Optionally place a "baseline/" folder (same structure as the model folders) in t
 root directory.  Its metrics_summary.csv will be read and drawn as a horizontal
 reference line on every plot (same hue as the metric line, slightly desaturated and
 semi-transparent).
-
-Usage:
-  python plot_model_metrics.py --root_dir ./.. --output_dir ./plots
 """
 
 import os
@@ -23,7 +20,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
-# ── Config ──────────────────────────────────────────────────────────────────
 
 # Metrics to plot: (title, method, column, y_label)
 METRICS = [
@@ -94,8 +90,6 @@ FOLDER_RE = re.compile(
     r"_do(?P<dropout>.+)$"
 )
 
-# ── Light theme ──────────────────────────────────────────────────────────────
-
 STYLE = {
     "figure.facecolor": "#ffffff",
     "axes.facecolor":   "#f7f8fc",
@@ -113,8 +107,6 @@ STYLE = {
 ACCENT_COLOR  = "#3a6fd8"   # blue  (SHAP / default)
 ACCENT2_COLOR = "#d85a2a"   # orange (GradCAM)
 
-
-# ── Colour helpers ────────────────────────────────────────────────────────────
 
 def _hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
     h = hex_color.lstrip("#")
@@ -134,8 +126,6 @@ def desaturate(hex_color: str, factor: float = 0.45) -> str:
     r2, g2, b2 = colorsys.hsv_to_rgb(h, s * factor, v)
     return _rgb_to_hex(r2, g2, b2)
 
-
-# ── Folder / CSV parsing ──────────────────────────────────────────────────────
 
 def parse_folder_name(folder_name: str) -> dict | None:
     base = os.path.basename(folder_name.rstrip("/\\"))
@@ -160,8 +150,6 @@ def load_csv(folder_path: str) -> pd.DataFrame | None:
     df["method"] = df["method"].str.strip().str.lower()
     return df
 
-
-# ── Baseline loading ──────────────────────────────────────────────────────────
 
 def load_baseline(root_dir: str) -> dict:
     """
@@ -216,8 +204,6 @@ def get_baseline_value(baseline: dict, method: str | None, column: str) -> float
     return None
 
 
-# ── Data collection ───────────────────────────────────────────────────────────
-
 def collect_data(root_dir: str) -> pd.DataFrame:
     records = []
     scan_dir = os.getcwd() if root_dir == "." else root_dir
@@ -247,8 +233,6 @@ def collect_data(root_dir: str) -> pd.DataFrame:
             combined[col] = pd.to_numeric(combined[col], errors="coerce")
     return combined
 
-
-# ── Label helpers ─────────────────────────────────────────────────────────────
 
 def make_x_labels(sorted_folders: list[str], params_map: dict) -> list[str]:
     labels = []
@@ -280,8 +264,6 @@ def sort_folders_by_accuracy(df: pd.DataFrame) -> list[str]:
     )
     return ref["folder"].tolist()
 
-
-# ── Secondary axes ────────────────────────────────────────────────────────────
 
 def _add_param_axis(ax, df, sorted_folders, x):
     ax2 = ax.twiny()
@@ -317,8 +299,6 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
     return ax2
 
 
-# ── Baseline drawing helper ───────────────────────────────────────────────────
-
 def _draw_baseline_hline(ax, value: float, color: str,
                          label: str = "baseline",
                          alpha: float = 0.45,
@@ -347,8 +327,6 @@ def _draw_baseline_hline(ax, value: float, color: str,
         clip_on=False,
     )
 
-
-# ── Single-metric line plots ──────────────────────────────────────────────────
 
 def plot_metric(
     df: pd.DataFrame,
@@ -438,8 +416,6 @@ def plot_all(df, sorted_folders_params, sorted_folders_acc,
                     baseline, secondary_axis="accuracy")
 
 
-# ── Summary grids ─────────────────────────────────────────────────────────────
-
 def plot_summary_grid(df, sorted_folders, x_labels, output_dir,
                       baseline: dict, suffix="by_params"):
     n = len(METRICS)
@@ -505,8 +481,6 @@ def plot_summary_grid(df, sorted_folders, x_labels, output_dir,
         plt.close(fig)
     print(f"  saved -> {out}")
 
-
-# ── Multi-metric line plots ───────────────────────────────────────────────────
 
 def plot_multi_metric_line(
     df: pd.DataFrame,
@@ -619,8 +593,6 @@ def plot_all_line_plots(df, sorted_folders_params, sorted_folders_acc,
             baseline,
         )
 
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Plot AI model interpretability metrics.")

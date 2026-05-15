@@ -1,3 +1,9 @@
+"""
+@author: Giulio Lo Cigno
+
+This file contains implementation of classes and functions that are used across multiple of the other files
+"""
+
 import os
 import torch
 import re
@@ -209,7 +215,7 @@ class I_HAVE_A_THEORY(nn.Module):
 
         for i in range(conv_layers):
             if i == 0:
-                k = 5
+                k = 5  # NOTE: this implementaiton fixes the kernel size of the first two layers, and the one passed to the constructor is used only from the 3rd layer onward.
             elif i == 1:
                 k = 9
             else:
@@ -322,6 +328,9 @@ class GradCAM:
 
 
 def evaluate_2(model, test_loader, DEVICE):
+    """
+    An outdated versuib if the evaluate() function, still correct and used in Grad_cam_visual.py, but with a different signature
+    """
     model.eval()
     preds, trues = [], []
 

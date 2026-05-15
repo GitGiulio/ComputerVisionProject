@@ -1,3 +1,8 @@
+"""
+@author: Giulio Lo Cigno, Frederik Buchholdt, and Mathijs Tobe
+
+Allows to systematically calculate and save metrics for multiple model-method combinations
+"""
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -72,17 +77,13 @@ class EvalConfig:
         device: 'cuda' or 'cpu'.
         output_dir: Folder where plots and CSV are saved.
         # Metric-specific knobs
-        fidelity_features_per_step: Exact number of features added (insertion) or removed (deletion) at each curve step.
+        fidelity_steps: Exact number of features added (insertion) or removed (deletion) at each curve step.
             Using a fixed count, rather than a fixed number of steps, guarantees that insertion and deletion are perfect duals with
-            identical step sizes. Total steps = ceil(C*H*W / fidelity_features_per_step).
+            identical step sizes. Total steps = ceil(C*H*W / fidelity_steps).
         stability_n_perturbations: Number of noisy copies per image.
         stability_noise_std: Std of Gaussian noise added for stability test.
         separability_n_pairs: Number of cross-class image pairs to check.
         separability_eps: Minimum L2 distance to consider two maps different.
-        smoothgrad_n_samples: Noise samples averaged in SmoothGrad.
-        smoothgrad_noise_std: Noise std for SmoothGrad.
-        lime_n_segments: Number of superpixel segments for LIME.
-        lime_n_samples: Number of perturbed samples for LIME surrogate.
     """
     #interpretability_method: str = "gradcam"
     target_layer: Optional[torch.nn.Module] = None
@@ -90,11 +91,10 @@ class EvalConfig:
     batch_size: int = 8
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     output_dir: str = "./interpretability_results"
-    fidelity_features_per_step: int = 100
+    fidelity_steps: int = 100
     stability_n_perturbations: int = 10
     stability_noise_std: float = 0.05
-    separability_n_pairs: int = 30
-    separability_eps: float = 1e-3
+    separability_eps: float = 0.05
     shap_background: Optional[torch.Tensor] = None
     shap_explain_probability: bool = True
 
@@ -414,19 +414,11 @@ def _fidelity_curve(
             f"({H}x{W}). Saliency map spatial size must match the image."
         )
 
-    image = image.to(device)
-
-    # New baseline: blurred image instead of black/zero image
-    baseline = gaussian_blur_baseline(
-        image,
-        kernel_size=31,
-        sigma=10.0,
-    ).to(device)
-
     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
     ranked_t = ranked_t.clamp(0, n_features - 1)
 
     image = image.to(device)
+    # New baseline: blurred image instead of black/zero image
     baseline = make_deletion_baseline(image).to(device)
 
     scores = []
@@ -456,82 +448,6 @@ def _fidelity_curve(
             scores.append(score)
 
     return torch.stack(scores)
-
-# def _fidelity_curve(
-#     model: torch.nn.Module,
-#     image: torch.Tensor,
-#     ranked: np.ndarray,
-#     label: int,
-#     steps: int,
-#     device: torch.device,
-#     mode: str,          # "insertion" or "deletion"
-# ) -> torch.Tensor:
-#     """Core pixel-masking loop shared by insertion and deletion AUC.
- 
-#     Runs the model in eval() + no_grad() mode and returns a (steps+1,) tensor
-#     of class scores, one per masking step.
- 
-#     For *insertion*: starts from an all-zero image and progressively reveals
-#     the most important pixels.  Score should rise quickly → high AUC is good.
- 
-#     For *deletion*: starts from the full image and progressively removes the
-#     most important pixels.  Score should fall quickly → low AUC is good.
- 
-#     Args:
-#         model:   PyTorch model already on `device`, will be put in eval mode.
-#         image:   Single image tensor (C, H, W) on `device`.
-#         ranked:  1-D int array of pixel indices sorted most-to-least important,
-#                  length H*W.  Comes from argsort(saliency.flatten())[::-1].
-#         label:   Ground-truth class index (0 or 1).
-#         steps:   Number of masking steps (curve resolution).
-#         device:  Torch device.
-#         mode:    "insertion" or "deletion".
- 
-#     Returns:
-#         1-D float tensor of shape (steps+1,) with values in [0, 1].
-#     """
-#     assert mode in ("insertion", "deletion"), f"Unknown mode: {mode}"
-
-#     C, H, W = image.shape
-#     n_features = C * H * W
-
-#     # Guard: saliency must have been computed for the same spatial size
-#     if len(ranked) != n_features:
-#         raise ValueError(
-#             f"ranked has {len(ranked)} entries but image has {n_features} pixels "
-#             f"({H}x{W}). Saliency map spatial size must match the image."
-#         )
-
-#     ranked_t = torch.from_numpy(ranked.copy()).long().to(device)
-
-#     # Safety clamp: catches any remaining off-by-one issues
-#     ranked_t = ranked_t.clamp(0, n_features - 1)
-
-#     scores = []
-#     model.eval()
-#     with torch.no_grad():
-#         for step in range(steps + 1):
-#             n_top = int(step / steps * n_features)
-
-#             if mode == "insertion":
-#                 mask = torch.zeros(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 1.0
-#             else:  # deletion
-#                 mask = torch.ones(n_features, device=device)
-#                 if n_top > 0:
-#                     mask[ranked_t[:n_top]] = 0.0
-
-#             mask   = mask.view(C, H, W)
-#             # masked = image * mask
-#             masked = image * mask + blurred_image * (1.0 - mask)
-
-#             logit = model(masked.unsqueeze(0))
-#             prob  = torch.sigmoid(logit).squeeze()
-#             score = prob if label == 1 else (1.0 - prob)
-#             scores.append(score)
-
-#     return torch.stack(scores)
 
 def gaussian_blur_baseline(
     image: torch.Tensor,
@@ -601,24 +517,24 @@ def compute_fidelity(
     del_auc = float(torch.trapezoid(del_scores, xs).item())
     ins_auc = float(torch.trapezoid(ins_scores, xs).item())
  
-    # DEBUG plot
-    xs_np  = xs.cpu().numpy()
-    del_np = del_scores.cpu().numpy()
-    ins_np = ins_scores.cpu().numpy()
+    # DEBUG to plot specific sample dAUC and iAUC
+    #xs_np  = xs.cpu().numpy()
+    #del_np = del_scores.cpu().numpy()
+    #ins_np = ins_scores.cpu().numpy()
  
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-    ax1.plot(xs_np, del_np)
-    ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
-    ax1.set_xlabel("Fraction of pixels removed")
-    ax1.set_ylabel("Model score")
-    ax2.plot(xs_np, ins_np)
-    ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
-    ax2.set_xlabel("Fraction of pixels revealed")
-    ax2.set_ylabel("Model score")
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path)
-    plt.close(fig)
+    #fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+    #ax1.plot(xs_np, del_np)
+    #ax1.set_title(f"Deletion AUC = {del_auc:.4f}  (lower = better)")
+    #ax1.set_xlabel("Fraction of pixels removed")
+    #ax1.set_ylabel("Model score")
+    #ax2.plot(xs_np, ins_np)
+    #ax2.set_title(f"Insertion AUC = {ins_auc:.4f}  (higher = better)")
+    #ax2.set_xlabel("Fraction of pixels revealed")
+    #ax2.set_ylabel("Model score")
+    #fig.tight_layout()
+    #os.makedirs(os.path.dirname(path), exist_ok=True)
+    #fig.savefig(path)
+    #plt.close(fig)
     # DEBUG plot
 
     return del_auc, ins_auc
@@ -637,7 +553,7 @@ def compute_stability(
     the explanation changes relative to the input change.
     Lower values indicate more stable (robust) explanations.
 
-    The Lipschitz ratio is computed over the flattened (C×H×W) attribution
+    The Lipschitz ratio is computed over the flattened (CxHxW) attribution
     vectors, so channel-level differences are fully captured.
 
     Args:
@@ -700,7 +616,6 @@ def compute_separability(
     explainer: Explainer,
     images: list[torch.Tensor],
     labels: list[int],
-    n_pairs: int,
     eps: float,
 ) -> float:
     """Fraction of cross-class image pairs that have sufficiently different maps.
@@ -708,45 +623,32 @@ def compute_separability(
     A good explainer should produce distinct explanations for distinct inputs.
     Pairs are sampled from images belonging to different classes.
 
-    The L2 distance is computed over the flattened (C×H×W) attribution vectors,
+    The L2 distance is computed over the flattened (CxHxW) attribution vectors,
     capturing both spatial and channel-level differences.
 
     Args:
         explainer: Explainer instance.
         images: List of image tensors.
         labels: Corresponding class labels.
-        n_pairs: Number of pairs to evaluate.
         eps: Minimum L2 distance between flattened (C, H, W) maps to count as
              "separable".
 
     Returns:
         Fraction of pairs that are separable (float in [0, 1]).
     """
-    # Group image indices by class
-    class_to_idxs: dict[int, list[int]] = defaultdict(list)
-    for i, lbl in enumerate(labels):
-        class_to_idxs[lbl].append(i)
-
-    classes = list(class_to_idxs.keys())
-    if len(classes) < 2:
-        return 1.0  # trivially separable if only one class present
-
-    rng = np.random.default_rng(42)
     separable = 0
+    tot = 0
+    for i in range(len(images)):
+        for j in range(len(images)):
+            if j < i:
+                tot += 1
+                sal1 = explainer.explain(images[i], labels[i]).flatten()
+                sal2 = explainer.explain(images[j], labels[j]).flatten()
 
-    for _ in range(n_pairs):
-        # Pick two different classes, then one image from each
-        c1, c2 = rng.choice(classes, size=2, replace=False)
-        i1 = rng.choice(class_to_idxs[c1])
-        i2 = rng.choice(class_to_idxs[c2])
+                if np.linalg.norm(sal1 - sal2) > eps:
+                    separable += 1
 
-        sal1 = explainer.explain(images[i1], labels[i1]).flatten()
-        sal2 = explainer.explain(images[i2], labels[i2]).flatten()
-
-        if np.linalg.norm(sal1 - sal2) > eps:
-            separable += 1
-
-    return separable / n_pairs
+    return separable / tot # equivalent of doing 2*separable / (32*31)
 
 
 def _normalise(arr: np.ndarray) -> np.ndarray:
@@ -780,11 +682,13 @@ class SaliencyVisualiser:
 
     Args:
         out_dir: Root directory; sub-folders per class are created automatically.
-        idx_to_class: Dict mapping int label → class name string.
+        idx_to_class: Dict mapping int label -> class name string.
         gradcam_cmap: Matplotlib colormap name for GradCAM heatmaps.
         shap_cmap: Matplotlib colormap name for SHAP heatmaps (should be diverging).
         overlay_alpha: Transparency of the heatmap layer in the overlay panel.
         dpi: Output image resolution.
+
+    NOTE: OUTDATED (still usefull, but not relly used)
     """
 
     def __init__(
@@ -842,7 +746,7 @@ class SaliencyVisualiser:
         """Save a 3-panel GradCAM visualisation.
 
         The raw CAM is normalised to [0, 1] here at plot time, exactly as in
-        the original save_gradcam_visualization(): NaN → 0, clamp to ≥ 0,
+        the original save_gradcam_visualization(): NaN -> 0, clamp to ≥ 0,
         divide by max. Nothing is modified before this point.
 
         Args:
@@ -916,7 +820,7 @@ class SaliencyVisualiser:
         true_name = self.idx_to_class.get(true_label, str(true_label))
         pred_name = self.idx_to_class.get(pred_label, str(pred_label))
 
-        # Sum across channels → (H, W), then symmetrically normalise
+        # Sum across channels -> (H, W), then symmetrically normalise
         hm = shap_hwc.sum(axis=-1)
         shap_total = float(hm.sum())
         max_abs = np.max(np.abs(hm)) + 1e-8
@@ -950,63 +854,6 @@ class SaliencyVisualiser:
         plt.savefig(out_path, dpi=self.dpi, bbox_inches="tight")
         plt.close(fig)
 
-    def save_generic(
-        self,
-        image_tensor: torch.Tensor,
-        saliency: np.ndarray,
-        method_name: str,
-        pred_prob: float,
-        true_label: int,
-        pred_label: int,
-        filename: str,
-    ):
-        """Save a generic 3-panel saliency visualisation for non-GradCAM/SHAP methods.
-
-        Uses a hot colormap with [0, 1] range. Suitable for IntGrad, SmoothGrad,
-        LIME, etc.
-
-        Accepts saliency of shape (C, H, W) or (H, W). When (C, H, W) is given,
-        the mean absolute value across channels is taken to produce a (H, W) map
-        for display.
-
-        Args:
-            image_tensor: Input image tensor (C, H, W).
-            saliency: Saliency map of shape (C, H, W) or (H, W).
-            method_name: Method name for the plot title.
-            pred_prob: Probability for the predicted class.
-            true_label: Ground-truth class index.
-            pred_label: Predicted class index.
-            filename: Output filename.
-        """
-        img = self._to_hwc(image_tensor)
-        true_name = self.idx_to_class.get(true_label, str(true_label))
-        pred_name = self.idx_to_class.get(pred_label, str(pred_label))
-
-        # Collapse (C, H, W) → (H, W) by mean absolute value across channels
-        hm = np.abs(saliency).mean(axis=0) if saliency.ndim == 3 else saliency
-        hm = _normalise(hm)  # re-normalise to [0, 1] after abs+mean
-
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-        axes[0].imshow(img)
-        axes[0].set_title(f"Input\nTrue: {true_name}\nPred: {pred_name} ({pred_prob:.3f})")
-        axes[0].axis("off")
-
-        im = axes[1].imshow(hm, cmap="hot", vmin=0, vmax=1)
-        axes[1].set_title(f"{method_name.upper()} heatmap")
-        axes[1].axis("off")
-        plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
-
-        axes[2].imshow(img)
-        axes[2].imshow(hm, cmap="hot", alpha=self.overlay_alpha, vmin=0, vmax=1)
-        axes[2].set_title("Overlay")
-        axes[2].axis("off")
-
-        plt.tight_layout()
-        out_path = self._resolve_path(true_label, filename)
-        plt.savefig(out_path, dpi=self.dpi, bbox_inches="tight")
-        plt.close(fig)
-
     def save_grid(
         self,
         images: list[torch.Tensor],
@@ -1015,7 +862,7 @@ class SaliencyVisualiser:
         n_show: int = 8,
         filename: str = "saliency_grid.png",
     ):
-        """Save a compact image/saliency grid (2 rows × N cols) to out_dir root.
+        """Save a compact image/saliency grid (2 rows x N cols) to out_dir root.
 
         Args:
             images: List of image tensors (C, H, W).
@@ -1036,7 +883,7 @@ class SaliencyVisualiser:
             if i == 0:
                 axes[0, i].set_title("Image", fontsize=9)
 
-            # Collapse (C, H, W) → (H, W) if needed
+            # Collapse (C, H, W) -> (H, W) if needed
             sal = saliency_maps[i]
             hm = _normalise(np.abs(sal).mean(axis=0)) if sal.ndim == 3 else sal
 
@@ -1083,7 +930,7 @@ def plot_saliency_grid(
         if i == 0:
             axes[0, i].set_title("Image", fontsize=9)
 
-        # Collapse (C, H, W) → (H, W) if needed
+        # Collapse (C, H, W) -> (H, W) if needed
         sal = saliency_maps[i]
         hm = _normalise(np.abs(sal).mean(axis=0)) if sal.ndim == 3 else sal
 
@@ -1153,12 +1000,12 @@ def plot_bar_charts(results: dict[str, MetricResults], save_path: str = "bars.pn
     """
     methods = list(results.keys())
     metrics = {
-        "Deletion AUC\n(lower = better)":  [r.deletion_auc   for r in results.values()],
+        "Deletion AUC\n(lower = better)":   [r.deletion_auc   for r in results.values()],
         "Insertion AUC\n(higher = better)": [r.insertion_auc  for r in results.values()],
         "Stability\n(lower = better)":      [r.stability      for r in results.values()],
         "Identity\n(higher = better)":      [r.identity       for r in results.values()],
         "Separability\n(higher = better)":  [r.separability   for r in results.values()],
-        "Avg Time (s)\n(lower = better)":   [r.avg_time_sec   for r in results.values()],
+        "Avg Time(s)\n(lower = better)":    [r.avg_time_sec   for r in results.values()],
     }
 
     n_metrics = len(metrics)
@@ -1208,7 +1055,7 @@ def print_summary_table(results: dict[str, MetricResults]):
 
 
 def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
-    """Save all metric results to a CSV file.
+    """Save all metric results to a CSV file. later used to plot general resluts.
 
     Args:
         results: Dict mapping method name -> MetricResults.
@@ -1237,6 +1084,7 @@ def save_csv(results: dict[str, MetricResults], save_path: str = "metrics.csv"):
                 "model_test_f1": round(res.model_test_f1, 6),
             })
     print(f"  Saved: {save_path}")
+
 def load_correct_samples(
     dataset: Dataset,
     model: torch.nn.Module,
@@ -1342,39 +1190,6 @@ def load_correct_samples(
 
     return out_images, out_labels, nums_by_class
 
-
-def load_samples(
-    dataset: Dataset,
-    n_samples: int,
-    batch_size: int,
-) -> tuple[list[torch.Tensor], list[int]]:
-    """Draw n_samples from a Dataset and return individual tensors + labels.
-
-    Args:
-        dataset: Any PyTorch Dataset returning (image_tensor, label).
-        n_samples: How many samples to use.
-        batch_size: DataLoader batch size (affects speed, not correctness).
-
-    Returns:
-        Tuple of (list of image tensors, list of integer labels).
-    """
-    n_samples = min(n_samples, len(dataset))
-    
-    selected_indices = torch.randperm(len(dataset))[:n_samples].tolist()
-
-    subset = Subset(dataset, selected_indices)
-
-    loader = DataLoader(subset, batch_size=batch_size, shuffle=False,collate_fn=collate_skip_none)
-
-    images, labels = [], []
-    for imgs, lbls, _ in loader:
-        for img, lbl in zip(imgs, lbls):
-            images.append(img.float())
-            labels.append(int(lbl))
-
-    return images, labels
-
-
 def evaluate_method(
     method_name: str,
     model: torch.nn.Module,
@@ -1399,7 +1214,7 @@ def evaluate_method(
 
     explainer = Explainer(method_name, model, config)
 
-    del_aucs, ins_aucs, del_aucs_cap, stab_scores, id_scores, times = [], [], [], [], [], []
+    del_aucs, ins_aucs, stab_scores, id_scores, times = [], [], [], [], []
     saliency_maps = []
 
     print(f"\n  Evaluating: {method_name.upper()} on {len(images)} samples")
@@ -1415,12 +1230,9 @@ def evaluate_method(
 
         # --- Fidelity ---
         d_auc, i_auc = compute_fidelity(model, img, sal, lbl,
-                                         config.fidelity_features_per_step, device,f"{config.output_dir}/{method_name}/fidelity_{i}.png")
+                                         config.fidelity_steps, device,f"{config.output_dir}/{method_name}/fidelity_{i}.png")
         del_aucs.append(d_auc)
         ins_aucs.append(i_auc)
-
-        #d_auc_cap, i_auc_cap = get_captum_fidelity(model, img, sal, lbl,device,500)
-        #del_aucs_cap.append(d_auc_cap)
 
         # --- Stability ---
         stab = compute_stability(explainer, img, lbl,
@@ -1434,7 +1246,6 @@ def evaluate_method(
 
     # --- Separability (needs the full image pool) ---
     sep = compute_separability(explainer, images, labels,
-                                config.separability_n_pairs,
                                 config.separability_eps)
 
     explainer.remove_hooks()
@@ -1492,9 +1303,7 @@ def run_pipeline(
     print(f"{'='*60}")
 
 
-    # images, labels = load_samples(dataset, config.n_samples, config.batch_size)
-    
-    # Loading correct samples
+    # Loading correctly-predicted only samples
     device = torch.device(config.device)
     images, labels, sample_nums = load_correct_samples(
         dataset, model, config.n_samples, config.batch_size, device
@@ -1679,7 +1488,7 @@ def parse_model_filename(fname: str) -> Optional[dict]:
  
     Example:
         model_kernel=[5,9,23]_32_3_64_1_wd0.0001_do0.0.pth
-        → {kernel_size: 23, conv_filter: 32, conv_layer: 3,
+        -> {kernel_size: 23, conv_filter: 32, conv_layer: 3,
            dense_neuron: 64, dense_layer: 1,
            weight_decay: 0.0001, dropout: 0.0}
  
@@ -1687,13 +1496,13 @@ def parse_model_filename(fname: str) -> Optional[dict]:
         Dict of parsed values, or None if the filename does not match.
     """
     pattern = (
-        r"finetuned_fidelity_k=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K])
+        r"finetuned_fidelity_k=\[5,9,(\d+)\]"   # kernel_size  (third element of [5,9,K]) NOTE we made this intentionally strict, so that we had to change it manually to do something different (and not capture wrong models by accident)
         r"_(\d+)"                         # conv_filter
         r"_(\d+)"                         # conv_layer
         r"_(\d+)"                         # dense_neuron
         r"_(\d+)"                         # dense_layer
         r"_wd([0-9eE+\-\.]+)"            # weight_decay  (float, e.g. 1e-4 or 0.0001)
-        r"_do([0-9eE+\-\.]+)"            # dropout       (float, e.g. 0.0)
+        r"_do([0-9eE+\-\.]+)"            # dropout       (float, e.g. 0.0) NOTE never used in the end, but the implementation allows it
         r"(?:\.pth)?$"                    # optional .pth extension
     )
     m = re.search(pattern, fname)
@@ -1712,9 +1521,7 @@ if __name__ == "__main__":
     DATA_DIR = "./DATA/Cat_dog_splitted/"
     DEVICE =  f"cuda" if torch.cuda.is_available() else "cpu"
     BATCH_SIZE = 100
-    #train_loader, val_dataset, test_loader, idx_to_class = data_loaders(DEVICE,BATCH_SIZE)
     train_dataset = SafeImageFolder(os.path.join(DATA_DIR, "train"),   transform=get_tensor_transform())
-    #val_dataset = SafeImageFolder(os.path.join(DATA_DIR, "val"),   transform=get_tensor_transform())
     test_dataset = SafeImageFolder(os.path.join(DATA_DIR, "test"),   transform=get_tensor_transform())
 
     idx_to_class = {i: name for i, name in enumerate(test_dataset.classes)}
@@ -1750,7 +1557,7 @@ if __name__ == "__main__":
  
         output_dir = f"./finetuning/interpretability_results_dogs_k=[5,9,{hp["kernel_size"]}]_{hp["conv_filter"]}_{hp["conv_layer"]}_{hp["dense_neuron"]}_{hp["dense_layer"]}_wd{hp["weight_decay"]}_do{hp["dropout"]}"
  
-        # Skip already-completed runs (CSV written as the last step)
+        # Skip already-completed runs (CSV written as the last step) to avoid overwriting results by error
         csv_path = os.path.join(output_dir, "metrics_summary.csv")
         if os.path.isfile(csv_path):
             print(f"\n[SKIP] Already evaluated: {fname}  (found {csv_path})")
@@ -1763,7 +1570,6 @@ if __name__ == "__main__":
         print(f"{'='*70}")
  
         # Build model from parsed hyperparameters
-        #try:
         model = I_HAVE_A_THEORY(
             kernel_size   = hp["kernel_size"],
             conv_filters  = hp["conv_filter"],
@@ -1776,9 +1582,6 @@ if __name__ == "__main__":
         
         model.load_state_dict(state_dict, strict=False)
         model.eval()
-        #except Exception as exc:
-        #    print(f"  [ERROR] Could not load model {fname}: {exc}")
-        #    continue
  
         target_layer = find_last_conv_layer(model)
         
@@ -1788,11 +1591,11 @@ if __name__ == "__main__":
             batch_size             = 32,
             device                 = "cuda" if torch.cuda.is_available() else "cpu",
             output_dir             = output_dir,
-            fidelity_features_per_step = 300,      # for a 3×224×224 image: 150528 features → ~500 features per step
+            fidelity_steps = 300,      # for a 3x224x224 image: 150528 features -> ~500 features per step
             stability_n_perturbations = 5,
             stability_noise_std    = 0.05,
             separability_n_pairs   = 20,
-            separability_eps       = 1e-3,      # TODO In report we should argue for why this amount. 
+            separability_eps       = 0.05,      # TODO In report we should argue for why this amount. 
             shap_background           = shap_background,
             shap_explain_probability  = False,         # True = explain sigmoid probs
         )

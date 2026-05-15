@@ -68,7 +68,7 @@ We evaluated two main approaches:
 #### 2. Grad-CAM (Custom Implementation)
 - Implemented Grad-CAM from scratch
 - Produces **class-discriminative heatmaps**
-- Useful for qualitative and visual inspection
+- Useful for qualitative and visual inspection and to show if the improvments that we achive are specific to SHAP or not
 
 ---
 
@@ -88,9 +88,12 @@ We developed a **systematic evaluation framework** that:
 
 1. Trains multiple CNN variants with different hyperparameters
 2. Applies SHAP and Grad-CAM to each model
-3. Computes:
-   - **Fidelity** (how well explanations reflect model behavior)
+3. Computes for each model-method pair:
+   - **Fidelity (iAUC and dAUC)** (how well explanations reflect model behavior)
    - **Stability** (sensitivity to small input perturbations)
+   - **Identiy**
+   - **Separability**
+   - **Time**
 4. Generates visual outputs:
    - Saliency maps
    - Pixel importance overlays
@@ -99,6 +102,10 @@ This allows direct comparison across:
 - Model configurations
 - Explainability methods
 
+---
+## Finetuning with SHAP's iAUC inclusion in the loss
+We developed a way to finetune those models taking in consideration the SHAP's iAUC value for gradient descent.
+This process is very computationally expensive, but can further improve **Fidelity** for SHAP as well as for Grad-CAM without loosing accuracy.
 ---
 
 ## Outputs
