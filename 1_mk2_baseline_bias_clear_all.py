@@ -1,10 +1,9 @@
 """
-Simple baseline-bias check for Cat/Dog binary classifiers.
+Simple baseline-bias + original-performance check for Cat/Dog binary classifiers.
 
 What this tests:
-  It does NOT compute explanations.
-  It only asks: "When the input is replaced by a baseline, does the model
-  systematically prefer Cat or Dog?"
+  1. Normal classification performance on original test images.
+  2. Whether uninformative baseline inputs make the model systematically prefer Cat or Dog.
 
 For a binary model:
   raw logit < 0  -> class 0
@@ -30,12 +29,14 @@ Baselines:
 Outputs:
   baseline_bias_summary.csv
   baseline_bias_per_image.csv
+  model_original_metrics.csv
   sampled_test_images.txt
 """
 
 from __future__ import annotations
 
 import csv
+import inspect
 import os
 import re
 from collections import defaultdict
@@ -44,6 +45,14 @@ from typing import Optional
 
 import numpy as np
 import torch
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision.transforms import functional as TF
 
@@ -76,16 +85,19 @@ BLUR_KERNEL_SIZE = 61
 BLUR_SIGMA = 20.0
 
 # If True, only original test images that the model classifies correctly are used.
+# IMPORTANT:
+#   Keep this False when you want real accuracy/confusion-matrix values.
+#   If True, accuracy becomes artificially perfect/near-perfect.
 ONLY_CORRECT_ORIGINALS = False
 
 # If True, skip models already present in baseline_bias_summary.csv.
+# If you changed this script and want fresh metrics, set False or delete old CSVs.
 SKIP_ALREADY_DONE = True
 
 # Toggle for evaluating only one model.
 # Set to None to evaluate every parsable .pth model in MODELS_DIR.
 # Example:
 # ONLY_MODEL = "model_kernel=[5,9,23]_32_3_64_1_wd0.0001_do0.0.pth"
-# ONLY_MODEL: Optional[str] = "model_kernel=[5,9,19]_32_3_512_1_wd0.001_do0.0.pth"
 ONLY_MODEL: Optional[str] = None
 
 
@@ -99,6 +111,7 @@ class ModelSpec:
     conv_layer: Optional[int] = None
     dense_neuron: Optional[int] = None
     dense_layer: Optional[int] = None
+    weight_decay: Optional[float] = None
     dropout: float = 0.0
 
 
@@ -128,10 +141,15 @@ def parse_model_filename(fname: str) -> Optional[ModelSpec]:
             conv_layer=int(m.group(3)),
             dense_neuron=int(m.group(4)),
             dense_layer=int(m.group(5)),
+            weight_decay=float(m.group(6)) if m.group(6) is not None else None,
             dropout=float(m.group(7)) if m.group(7) is not None else 0.0,
         )
 
-    pattern_plain = r"model_(\d+)_(\d+)_(\d+)_(\d+)$"
+    pattern_plain = (
+        r"model_(\d+)_(\d+)_(\d+)_(\d+)"
+        r"(?:_wd([0-9eE+\-.]+))?"
+        r"(?:_do([0-9eE+\-.]+))?$"
+    )
     m = re.search(pattern_plain, stem)
     if m is not None:
         return ModelSpec(
@@ -142,27 +160,50 @@ def parse_model_filename(fname: str) -> Optional[ModelSpec]:
             conv_layer=int(m.group(2)),
             dense_neuron=int(m.group(3)),
             dense_layer=int(m.group(4)),
+            weight_decay=float(m.group(5)) if m.group(5) is not None else None,
+            dropout=float(m.group(6)) if m.group(6) is not None else 0.0,
         )
 
     return None
 
 
+def call_model_constructor(cls, kwargs: dict) -> torch.nn.Module:
+    """Call model constructor while ignoring unsupported keyword arguments.
+
+    This makes the script robust if your local shared_code.py has or does not have
+    arguments like dropout_rate.
+    """
+    sig = inspect.signature(cls.__init__)
+    accepted = set(sig.parameters.keys())
+    accepted.discard("self")
+
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    return cls(**filtered)
+
+
 def build_model(spec: ModelSpec) -> torch.nn.Module:
     if spec.architecture == "I_HAVE_A_THEORY":
-        model = I_HAVE_A_THEORY(
-            kernel_size=spec.kernel_size,
-            conv_filters=spec.conv_filter,
-            conv_layers=spec.conv_layer,
-            dense_neurons=spec.dense_neuron,
-            dense_layers=spec.dense_layer,
-            dropout_rate=spec.dropout,
+        model = call_model_constructor(
+            I_HAVE_A_THEORY,
+            {
+                "kernel_size": spec.kernel_size,
+                "conv_filters": spec.conv_filter,
+                "conv_layers": spec.conv_layer,
+                "dense_neurons": spec.dense_neuron,
+                "dense_layers": spec.dense_layer,
+                "dropout_rate": spec.dropout,
+            },
         )
     elif spec.architecture == "CIFAKE_CNN":
-        model = CIFAKE_CNN(
-            conv_filters=spec.conv_filter,
-            conv_layers=spec.conv_layer,
-            dense_neurons=spec.dense_neuron,
-            dense_layers=spec.dense_layer,
+        model = call_model_constructor(
+            CIFAKE_CNN,
+            {
+                "conv_filters": spec.conv_filter,
+                "conv_layers": spec.conv_layer,
+                "dense_neurons": spec.dense_neuron,
+                "dense_layers": spec.dense_layer,
+                "dropout_rate": spec.dropout,
+            },
         )
     else:
         raise ValueError(f"Unknown architecture: {spec.architecture}")
@@ -222,6 +263,92 @@ def model_scores(model: torch.nn.Module, images: torch.Tensor) -> tuple[np.ndarr
     )
 
 
+def evaluate_original_images(
+    model: torch.nn.Module,
+    dataset: Dataset,
+    selected_by_class: dict[int, list[int]],
+) -> dict:
+    """
+    Evaluate model on original, unmodified test images.
+
+    For binary classes:
+      class 0 = dataset.classes[0]
+      class 1 = dataset.classes[1]
+
+    Confusion matrix layout:
+      [[tn, fp],
+       [fn, tp]]
+    """
+    all_indices = []
+    for cls in sorted(selected_by_class.keys()):
+        all_indices.extend(selected_by_class[cls])
+
+    loader = DataLoader(
+        Subset(dataset, all_indices),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        collate_fn=collate_skip_none,
+        pin_memory=DEVICE.startswith("cuda"),
+    )
+
+    y_true = []
+    y_pred = []
+    y_prob = []
+    y_logit = []
+
+    for batch in loader:
+        if batch is None:
+            continue
+
+        images, labels, _paths = batch
+        logits, probs = model_scores(model, images)
+        preds = (probs >= 0.5).astype(int)
+
+        y_true.extend(labels.numpy().astype(int).tolist())
+        y_pred.extend(preds.astype(int).tolist())
+        y_prob.extend(probs.astype(float).tolist())
+        y_logit.extend(logits.astype(float).tolist())
+
+    if len(y_true) == 0:
+        raise RuntimeError("No valid original images available for evaluation.")
+
+    y_true_np = np.array(y_true, dtype=int)
+    y_pred_np = np.array(y_pred, dtype=int)
+
+    cm = confusion_matrix(y_true_np, y_pred_np, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+
+    class_0_total = int((y_true_np == 0).sum())
+    class_1_total = int((y_true_np == 1).sum())
+
+    class_0_correct = int(((y_true_np == 0) & (y_pred_np == 0)).sum())
+    class_1_correct = int(((y_true_np == 1) & (y_pred_np == 1)).sum())
+
+    class_0_accuracy = class_0_correct / class_0_total if class_0_total > 0 else float("nan")
+    class_1_accuracy = class_1_correct / class_1_total if class_1_total > 0 else float("nan")
+
+    return {
+        "original_n": len(y_true),
+        "accuracy": float(accuracy_score(y_true_np, y_pred_np)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true_np, y_pred_np)),
+        "precision_class_1": float(precision_score(y_true_np, y_pred_np, zero_division=0)),
+        "recall_class_1": float(recall_score(y_true_np, y_pred_np, zero_division=0)),
+        "f1_class_1": float(f1_score(y_true_np, y_pred_np, zero_division=0)),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "class_0_total": class_0_total,
+        "class_1_total": class_1_total,
+        "class_0_correct": class_0_correct,
+        "class_1_correct": class_1_correct,
+        "class_0_accuracy": float(class_0_accuracy),
+        "class_1_accuracy": float(class_1_accuracy),
+        "mean_original_logit": float(np.mean(y_logit)),
+        "mean_original_p_class_1": float(np.mean(y_prob)),
+    }
+
+
 def maybe_filter_correct_indices(
     dataset: Dataset,
     model: torch.nn.Module,
@@ -242,7 +369,7 @@ def maybe_filter_correct_indices(
             pin_memory=DEVICE.startswith("cuda"),
         )
 
-        offset = 0
+        running_offset = 0
         for batch in loader:
             if batch is None:
                 continue
@@ -253,9 +380,9 @@ def maybe_filter_correct_indices(
 
             for j, (pred, label) in enumerate(zip(preds, labels.numpy())):
                 if int(pred) == int(label):
-                    correct.append(idxs[offset + j])
+                    correct.append(idxs[running_offset + j])
 
-            offset += len(labels)
+            running_offset += len(labels)
 
         filtered[cls] = correct
 
@@ -279,6 +406,22 @@ def summarize(values: list[float]) -> dict[str, float]:
         "std": float(arr.std(ddof=1)) if arr.size > 1 else 0.0,
         "min": float(arr.min()) if arr.size else float("nan"),
         "max": float(arr.max()) if arr.size else float("nan"),
+    }
+
+
+def prediction_count_stats(p1_values: list[float]) -> dict:
+    arr = np.array(p1_values, dtype=np.float64)
+    pred_1 = arr >= 0.5
+
+    n = int(arr.size)
+    n_class_1 = int(pred_1.sum())
+    n_class_0 = int(n - n_class_1)
+
+    return {
+        "baseline_pred_class_0_count": n_class_0,
+        "baseline_pred_class_1_count": n_class_1,
+        "baseline_pred_class_0_frac": n_class_0 / n if n > 0 else float("nan"),
+        "baseline_pred_class_1_frac": n_class_1 / n if n > 0 else float("nan"),
     }
 
 
@@ -308,7 +451,7 @@ def append_csv(path: str, rows: list[dict], fieldnames: list[str]) -> None:
     exists = os.path.isfile(path)
 
     with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if not exists:
             writer.writeheader()
         for row in rows:
@@ -322,7 +465,8 @@ def already_done_models(summary_path: str) -> set[str]:
     done = set()
     with open(summary_path, newline="") as f:
         for row in csv.DictReader(f):
-            done.add(row["model"])
+            if "model" in row:
+                done.add(row["model"])
     return done
 
 
@@ -331,6 +475,7 @@ def print_result_line(
     original_class_name: str,
     stats_prob: dict[str, float],
     stats_logit: dict[str, float],
+    pred_counts: dict,
     class_0_name: str,
     class_1_name: str,
 ) -> None:
@@ -344,8 +489,62 @@ def print_result_line(
         f"n={stats_prob['n']:>4d} | "
         f"avg p({class_0_name})={p0:.3f}, avg p({class_1_name})={p1:.3f} | "
         f"avg logit={stats_logit['mean']:+.3f} | "
+        f"pred {class_0_name}={pred_counts['baseline_pred_class_0_count']}, "
+        f"pred {class_1_name}={pred_counts['baseline_pred_class_1_count']} | "
         f"leans {side} ({strength})"
     )
+
+
+def make_summary_row(
+    spec: ModelSpec,
+    original_metrics: dict,
+    baseline: str,
+    original_class_id,
+    original_class_name: str,
+    stats_logit: dict,
+    stats_prob: dict,
+    pred_counts: dict,
+    class_0_name: str,
+    class_1_name: str,
+) -> dict:
+    mean_p1 = stats_prob["mean"]
+    mean_p0 = 1.0 - mean_p1
+
+    return {
+        "model": spec.fname,
+        "architecture": spec.architecture,
+        "kernel_size": spec.kernel_size,
+        "conv_filter": spec.conv_filter,
+        "conv_layer": spec.conv_layer,
+        "dense_neuron": spec.dense_neuron,
+        "dense_layer": spec.dense_layer,
+        "weight_decay": spec.weight_decay,
+        "dropout": spec.dropout,
+
+        **original_metrics,
+
+        "baseline": baseline,
+        "original_class_id": original_class_id,
+        "original_class_name": original_class_name,
+        "n": stats_prob["n"],
+        "mean_logit": stats_logit["mean"],
+        "std_logit": stats_logit["std"],
+        "min_logit": stats_logit["min"],
+        "max_logit": stats_logit["max"],
+        "mean_p_class_0": mean_p0,
+        "mean_p_class_1": mean_p1,
+        "std_p_class_1": stats_prob["std"],
+        "min_p_class_1": stats_prob["min"],
+        "max_p_class_1": stats_prob["max"],
+
+        **pred_counts,
+
+        "neutral_distance": abs(mean_p1 - 0.5),
+        "cat_bias_if_class_0_cat": 0.5 - mean_p1,
+        "dog_bias_if_class_1_dog": mean_p1 - 0.5,
+        "predicted_baseline_side": predicted_side(mean_p1, class_0_name, class_1_name),
+        "bias_strength": bias_strength(mean_p1),
+    }
 
 
 def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, list[int]]) -> None:
@@ -360,21 +559,61 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
     selected_by_class = maybe_filter_correct_indices(dataset, model, base_selected)
     classes = sorted(selected_by_class.keys())
 
+    original_metrics = evaluate_original_images(
+        model=model,
+        dataset=dataset,
+        selected_by_class=selected_by_class,
+    )
+
+    print("\nOriginal test-image performance:")
+    print(f"  accuracy           = {original_metrics['accuracy']:.4f}")
+    print(f"  balanced accuracy  = {original_metrics['balanced_accuracy']:.4f}")
+    print(f"  precision class 1  = {original_metrics['precision_class_1']:.4f}")
+    print(f"  recall class 1     = {original_metrics['recall_class_1']:.4f}")
+    print(f"  f1 class 1         = {original_metrics['f1_class_1']:.4f}")
+    print(
+        "  confusion matrix   = "
+        f"tn={original_metrics['tn']}, "
+        f"fp={original_metrics['fp']}, "
+        f"fn={original_metrics['fn']}, "
+        f"tp={original_metrics['tp']}"
+    )
+    print(f"  {class_0_name} accuracy = {original_metrics['class_0_accuracy']:.4f}")
+    print(f"  {class_1_name} accuracy = {original_metrics['class_1_accuracy']:.4f}")
+
     summary_rows = []
     per_image_rows = []
-
-    # Black baseline: one all-black image is enough.
-    sample_img, _, _ = dataset[0]
-    black = torch.zeros_like(sample_img).unsqueeze(0)
-    black_logit, black_p1 = model_scores(model, black)
-
-    black_logit = float(black_logit[0])
-    black_p1 = float(black_p1[0])
-    black_p0 = 1.0 - black_p1
 
     print("\nBaseline prediction meaning:")
     print(f"  p({class_1_name}) = sigmoid(logit). p({class_0_name}) = 1 - p({class_1_name}).")
     print(f"  logit < 0 leans {class_0_name}; logit > 0 leans {class_1_name}; logit = 0 is neutral.\n")
+
+    # -------------------------------------------------------------------------
+    # Black baseline: one all-black image is enough.
+    # -------------------------------------------------------------------------
+    sample_img, _, _ = dataset[0]
+    black = torch.zeros_like(sample_img).unsqueeze(0)
+    black_logit_arr, black_p1_arr = model_scores(model, black)
+
+    black_logit = float(black_logit_arr[0])
+    black_p1 = float(black_p1_arr[0])
+    black_p0 = 1.0 - black_p1
+
+    black_stats_logit = {
+        "n": 1,
+        "mean": black_logit,
+        "std": 0.0,
+        "min": black_logit,
+        "max": black_logit,
+    }
+    black_stats_prob = {
+        "n": 1,
+        "mean": black_p1,
+        "std": 0.0,
+        "min": black_p1,
+        "max": black_p1,
+    }
+    black_pred_counts = prediction_count_stats([black_p1])
 
     print(
         f"  BLACK once           | "
@@ -383,28 +622,24 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
         f"leans {predicted_side(black_p1, class_0_name, class_1_name)} ({bias_strength(black_p1)})"
     )
 
-    summary_rows.append({
-        "model": spec.fname,
-        "architecture": spec.architecture,
-        "baseline": "black",
-        "original_class_id": "all",
-        "original_class_name": "all",
-        "n": 1,
-        "mean_logit": black_logit,
-        "std_logit": 0.0,
-        "min_logit": black_logit,
-        "max_logit": black_logit,
-        "mean_p_class_0": black_p0,
-        "mean_p_class_1": black_p1,
-        "std_p_class_1": 0.0,
-        "min_p_class_1": black_p1,
-        "max_p_class_1": black_p1,
-        "predicted_baseline_side": predicted_side(black_p1, class_0_name, class_1_name),
-        "bias_strength": bias_strength(black_p1),
-    })
+    summary_rows.append(
+        make_summary_row(
+            spec=spec,
+            original_metrics=original_metrics,
+            baseline="black",
+            original_class_id="all",
+            original_class_name="ALL",
+            stats_logit=black_stats_logit,
+            stats_prob=black_stats_prob,
+            pred_counts=black_pred_counts,
+            class_0_name=class_0_name,
+            class_1_name=class_1_name,
+        )
+    )
 
-    # Blur and mean baselines: per original class.
-    # Also keep pooled values so we can print/save ALL Cat+Dog combined.
+    # -------------------------------------------------------------------------
+    # Blur and mean baselines: per original class + pooled ALL.
+    # -------------------------------------------------------------------------
     all_values = {
         "blur": {"logit": [], "p1": []},
         "mean": {"logit": [], "p1": []},
@@ -447,44 +682,37 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
                 values["mean"]["path"].append(path)
 
         for baseline in ["blur", "mean"]:
-            # Add this class to the pooled ALL result.
             all_values[baseline]["logit"].extend(values[baseline]["logit"])
             all_values[baseline]["p1"].extend(values[baseline]["p1"])
 
             stats_logit = summarize(values[baseline]["logit"])
             stats_prob = summarize(values[baseline]["p1"])
+            pred_counts = prediction_count_stats(values[baseline]["p1"])
 
             print_result_line(
                 baseline=baseline,
                 original_class_name=class_name,
                 stats_prob=stats_prob,
                 stats_logit=stats_logit,
+                pred_counts=pred_counts,
                 class_0_name=class_0_name,
                 class_1_name=class_1_name,
             )
 
-            mean_p1 = stats_prob["mean"]
-            mean_p0 = 1.0 - mean_p1
-
-            summary_rows.append({
-                "model": spec.fname,
-                "architecture": spec.architecture,
-                "baseline": baseline,
-                "original_class_id": cls,
-                "original_class_name": class_name,
-                "n": stats_prob["n"],
-                "mean_logit": stats_logit["mean"],
-                "std_logit": stats_logit["std"],
-                "min_logit": stats_logit["min"],
-                "max_logit": stats_logit["max"],
-                "mean_p_class_0": mean_p0,
-                "mean_p_class_1": mean_p1,
-                "std_p_class_1": stats_prob["std"],
-                "min_p_class_1": stats_prob["min"],
-                "max_p_class_1": stats_prob["max"],
-                "predicted_baseline_side": predicted_side(mean_p1, class_0_name, class_1_name),
-                "bias_strength": bias_strength(mean_p1),
-            })
+            summary_rows.append(
+                make_summary_row(
+                    spec=spec,
+                    original_metrics=original_metrics,
+                    baseline=baseline,
+                    original_class_id=cls,
+                    original_class_name=class_name,
+                    stats_logit=stats_logit,
+                    stats_prob=stats_prob,
+                    pred_counts=pred_counts,
+                    class_0_name=class_0_name,
+                    class_1_name=class_1_name,
+                )
+            )
 
             for path, logit, p1 in zip(
                 values[baseline]["path"],
@@ -494,6 +722,13 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
                 per_image_rows.append({
                     "model": spec.fname,
                     "architecture": spec.architecture,
+                    "kernel_size": spec.kernel_size,
+                    "conv_filter": spec.conv_filter,
+                    "conv_layer": spec.conv_layer,
+                    "dense_neuron": spec.dense_neuron,
+                    "dense_layer": spec.dense_layer,
+                    "weight_decay": spec.weight_decay,
+                    "dropout": spec.dropout,
                     "baseline": baseline,
                     "original_class_id": cls,
                     "original_class_name": class_name,
@@ -505,50 +740,74 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
                     "path": path,
                 })
 
-    # Combined ALL result: Cat and Dog baseline images pooled together.
     print("\nCombined baseline results, using Cat + Dog images together:")
     for baseline in ["blur", "mean"]:
         stats_logit = summarize(all_values[baseline]["logit"])
         stats_prob = summarize(all_values[baseline]["p1"])
+        pred_counts = prediction_count_stats(all_values[baseline]["p1"])
 
         print_result_line(
             baseline=baseline,
             original_class_name="ALL",
             stats_prob=stats_prob,
             stats_logit=stats_logit,
+            pred_counts=pred_counts,
             class_0_name=class_0_name,
             class_1_name=class_1_name,
         )
 
-        mean_p1 = stats_prob["mean"]
-        mean_p0 = 1.0 - mean_p1
+        summary_rows.append(
+            make_summary_row(
+                spec=spec,
+                original_metrics=original_metrics,
+                baseline=baseline,
+                original_class_id="all",
+                original_class_name="ALL",
+                stats_logit=stats_logit,
+                stats_prob=stats_prob,
+                pred_counts=pred_counts,
+                class_0_name=class_0_name,
+                class_1_name=class_1_name,
+            )
+        )
 
-        summary_rows.append({
-            "model": spec.fname,
-            "architecture": spec.architecture,
-            "baseline": baseline,
-            "original_class_id": "all",
-            "original_class_name": "ALL",
-            "n": stats_prob["n"],
-            "mean_logit": stats_logit["mean"],
-            "std_logit": stats_logit["std"],
-            "min_logit": stats_logit["min"],
-            "max_logit": stats_logit["max"],
-            "mean_p_class_0": mean_p0,
-            "mean_p_class_1": mean_p1,
-            "std_p_class_1": stats_prob["std"],
-            "min_p_class_1": stats_prob["min"],
-            "max_p_class_1": stats_prob["max"],
-            "predicted_baseline_side": predicted_side(mean_p1, class_0_name, class_1_name),
-            "bias_strength": bias_strength(mean_p1),
-        })
-
+    # -------------------------------------------------------------------------
+    # Save CSVs.
+    # -------------------------------------------------------------------------
     summary_path = os.path.join(OUTPUT_DIR, "baseline_bias_summary.csv")
     per_image_path = os.path.join(OUTPUT_DIR, "baseline_bias_per_image.csv")
+    model_metrics_path = os.path.join(OUTPUT_DIR, "model_original_metrics.csv")
 
     summary_fields = [
         "model",
         "architecture",
+        "kernel_size",
+        "conv_filter",
+        "conv_layer",
+        "dense_neuron",
+        "dense_layer",
+        "weight_decay",
+        "dropout",
+
+        "original_n",
+        "accuracy",
+        "balanced_accuracy",
+        "precision_class_1",
+        "recall_class_1",
+        "f1_class_1",
+        "tn",
+        "fp",
+        "fn",
+        "tp",
+        "class_0_total",
+        "class_1_total",
+        "class_0_correct",
+        "class_1_correct",
+        "class_0_accuracy",
+        "class_1_accuracy",
+        "mean_original_logit",
+        "mean_original_p_class_1",
+
         "baseline",
         "original_class_id",
         "original_class_name",
@@ -562,6 +821,15 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
         "std_p_class_1",
         "min_p_class_1",
         "max_p_class_1",
+
+        "baseline_pred_class_0_count",
+        "baseline_pred_class_1_count",
+        "baseline_pred_class_0_frac",
+        "baseline_pred_class_1_frac",
+
+        "neutral_distance",
+        "cat_bias_if_class_0_cat",
+        "dog_bias_if_class_1_dog",
         "predicted_baseline_side",
         "bias_strength",
     ]
@@ -569,6 +837,13 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
     per_image_fields = [
         "model",
         "architecture",
+        "kernel_size",
+        "conv_filter",
+        "conv_layer",
+        "dense_neuron",
+        "dense_layer",
+        "weight_decay",
+        "dropout",
         "baseline",
         "original_class_id",
         "original_class_name",
@@ -580,12 +855,57 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
         "path",
     ]
 
+    model_metrics_row = {
+        "model": spec.fname,
+        "architecture": spec.architecture,
+        "kernel_size": spec.kernel_size,
+        "conv_filter": spec.conv_filter,
+        "conv_layer": spec.conv_layer,
+        "dense_neuron": spec.dense_neuron,
+        "dense_layer": spec.dense_layer,
+        "weight_decay": spec.weight_decay,
+        "dropout": spec.dropout,
+        **original_metrics,
+    }
+
+    model_metrics_fields = [
+        "model",
+        "architecture",
+        "kernel_size",
+        "conv_filter",
+        "conv_layer",
+        "dense_neuron",
+        "dense_layer",
+        "weight_decay",
+        "dropout",
+        "original_n",
+        "accuracy",
+        "balanced_accuracy",
+        "precision_class_1",
+        "recall_class_1",
+        "f1_class_1",
+        "tn",
+        "fp",
+        "fn",
+        "tp",
+        "class_0_total",
+        "class_1_total",
+        "class_0_correct",
+        "class_1_correct",
+        "class_0_accuracy",
+        "class_1_accuracy",
+        "mean_original_logit",
+        "mean_original_p_class_1",
+    ]
+
     append_csv(summary_path, summary_rows, summary_fields)
     append_csv(per_image_path, per_image_rows, per_image_fields)
+    append_csv(model_metrics_path, [model_metrics_row], model_metrics_fields)
 
     print("\nSaved:")
     print(f"  {summary_path}")
     print(f"  {per_image_path}")
+    print(f"  {model_metrics_path}")
 
     del model
     if DEVICE == "cuda":
@@ -604,6 +924,11 @@ def main() -> None:
     print(f"Class 0 = {dataset.classes[0]}")
     print(f"Class 1 = {dataset.classes[1]}")
     print("The model output is interpreted as sigmoid(logit) = p(class 1).\n")
+
+    if ONLY_CORRECT_ORIGINALS:
+        print("WARNING: ONLY_CORRECT_ORIGINALS=True.")
+        print("Accuracy/confusion matrix will be computed on the filtered correct-only subset.")
+        print("Use ONLY_CORRECT_ORIGINALS=False for real model accuracy.\n")
 
     base_selected = class_balanced_indices(dataset, N_PER_CLASS_CAP)
 
@@ -653,8 +978,9 @@ def main() -> None:
             continue
 
     print("\nDone.")
-    print(f"Summary CSV:   {os.path.join(OUTPUT_DIR, 'baseline_bias_summary.csv')}")
-    print(f"Per-image CSV: {os.path.join(OUTPUT_DIR, 'baseline_bias_per_image.csv')}")
+    print(f"Summary CSV:      {os.path.join(OUTPUT_DIR, 'baseline_bias_summary.csv')}")
+    print(f"Per-image CSV:    {os.path.join(OUTPUT_DIR, 'baseline_bias_per_image.csv')}")
+    print(f"Model metrics CSV:{os.path.join(OUTPUT_DIR, 'model_original_metrics.csv')}")
 
 
 if __name__ == "__main__":

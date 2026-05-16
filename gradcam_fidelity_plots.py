@@ -25,18 +25,18 @@ from full_metrics_pipeline import _fidelity_curve
 # EDIT ONLY THESE VALUES
 # ============================================================
 
-DELETION_BASELINE = "mean"   # "black", "blur", or "mean"
+DELETION_BASELINE = "blur"   # "black", "blur", or "mean"
 
 BLUR_KERNEL_SIZE = 61   # must be odd
 BLUR_SIGMA = 20.0
 
 # --- Paste your numbers from load_correct_samples here ---
-cat_nums = []
+cat_nums = [40, 81, 102, 119]
 dog_nums = [2073]
 
-MODEL_PATH = "models/model_kernel=[5,9,11]_32_3_512_1_wd0.001_do0.0.pth"
+MODEL_PATH = "./models/model_kernel=[5,9,19]_32_3_512_1_wd0.001_do0.0.pth"
 
-DATA_DIR = "./DATA/Cat_dog_splitted/"
+DATA_DIR = "./Cat_dog_splitted/"
 
 OUTPUT_DIR = "./fidelity_plots/GradCAM/"
 
@@ -270,11 +270,11 @@ def compute_curves(model, image, saliency, label, device):
 
     del_scores_t = _fidelity_curve(
         model=model, image=image.to(device), ranked=ranked,
-        label=label, steps=DELETION_STEPS, device=device, mode="deletion",
+        label=label, steps=DELETION_STEPS, device=device, mode="deletion", deletion_baseline=DELETION_BASELINE,
     )
     ins_scores_t = _fidelity_curve(
         model=model, image=image.to(device), ranked=ranked,
-        label=label, steps=DELETION_STEPS, device=device, mode="insertion",
+        label=label, steps=DELETION_STEPS, device=device, mode="insertion", deletion_baseline=DELETION_BASELINE,    
     )
 
     del_auc = float(torch.trapezoid(del_scores_t, xs_t).item())

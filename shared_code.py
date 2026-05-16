@@ -312,6 +312,7 @@ class GradCAM:
         grads  = self.gradients
         activs = self.activations
         weights = grads.mean(dim=(2, 3), keepdim=True)
+        # weights = -weights      # JUST A TEST 
         cam = (weights * activs).sum(dim=1)
         cam = torch.relu(cam)
         cam = self._normalize_cam(cam)
