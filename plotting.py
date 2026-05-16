@@ -39,10 +39,10 @@ LINE_PLOT_CONFIGS = [
         "method":  "shap",
         "sort_by": "params",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-           # ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            # ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
+            # ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
+           ("Stability",     "stability",      "#000000"),
+            # ("Test Accuracy", "model_test_acc", "#a48600"),
         ],
     },
     {
@@ -50,32 +50,32 @@ LINE_PLOT_CONFIGS = [
         "method":  "gradcam",
         "sort_by": "params",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-           # ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            # ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
+            # ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
+           ("Stability",     "stability",      "#000000"),
+            # ("Test Accuracy", "model_test_acc", "#a48600"),
         ],
     },
     {
-        "title":   "SHAP Metrics + Test Accuracy  [sorted by test accuracy]",
+        "title":   "SHAP Stability  [sorted by test accuracy]",
         "method":  "shap",
         "sort_by": "accuracy",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-         #   ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            # ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
+            # ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
+           ("Stability",     "stability",      "#000000"),
+            # ("Test Accuracy", "model_test_acc", "#a48600"),
         ],
     },
     {
-        "title":   "GradCAM Metrics + Test Accuracy  [sorted by test accuracy]",
+        "title":   "GradCAM Stability  [sorted by test accuracy]",
         "method":  "gradcam",
         "sort_by": "accuracy",
         "metrics": [
-            ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
-            ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
-         #   ("Stability",     "stability",      "#7cf7a0"),
-            ("Test Accuracy", "model_test_acc", "#f7e07c"),
+            # ("Insertion AUC", "insertion_auc",  "#7c9ef7"),
+            # ("Deletion AUC",  "deletion_auc",   "#f7a07c"),
+           ("Stability",     "stability",      "#000000"),
+            # ("Test Accuracy", "model_test_acc", "#a48600"),
         ],
     },
 ]
@@ -91,14 +91,14 @@ FOLDER_RE = re.compile(
 )
 
 STYLE = {
-    "figure.facecolor": "#0f1117",
-    "axes.facecolor":   "#1a1d27",
-    "axes.edgecolor":   "#3a3d4d",
-    "axes.labelcolor":  "#e0e0e0",
-    "xtick.color":      "#a0a0b0",
-    "ytick.color":      "#a0a0b0",
-    "text.color":       "#e0e0e0",
-    "grid.color":       "#2a2d3d",
+    "figure.facecolor": "#ffffff",
+    "axes.facecolor":   "#ffffff",
+    "axes.edgecolor":   "#cccccc",
+    "axes.labelcolor":  "#111111",
+    "xtick.color":      "#333333",
+    "ytick.color":      "#333333",
+    "text.color":       "#111111",
+    "grid.color":       "#dddddd",
     "grid.linestyle":   "--",
     "grid.alpha":       0.6,
     "font.family":      "sans-serif",
@@ -132,7 +132,7 @@ def load_folder(folder_path: str) -> pd.DataFrame | None:
 def collect_data(root_dir: str) -> pd.DataFrame:
     records = []
     print(os.getcwd())
-    for entry in os.scandir(os.getcwd()):
+    for entry in os.scandir(root_dir):
         if not entry.is_dir():
             continue
         params = parse_folder_name(entry.name)
@@ -199,9 +199,9 @@ def _add_param_axis(ax, df, sorted_folders, x):
     for f in sorted_folders:
         p = ref.loc[f, "model_tot_param"] if f in ref.index else np.nan
         labels.append(f"{int(p)/1000000:.2f}M" if not np.isnan(p) else "?")
-    ax2.set_xticklabels(labels, fontsize=6.5, color="#7090c0")
-    ax2.set_xlabel("Total parameters ->", fontsize=8, color="#7090c0", labelpad=4)
-    ax2.tick_params(axis="x", colors="#7090c0")
+    ax2.set_xticklabels(labels, fontsize=6.5, color="#4466aa")
+    ax2.set_xlabel("Total parameters ->", fontsize=8, color="#4466aa", labelpad=4)
+    ax2.tick_params(axis="x", colors="#4466aa")
     for spine in ax2.spines.values():
         spine.set_visible(False)
     return ax2
@@ -216,9 +216,9 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
     for f in sorted_folders:
         a = ref.loc[f, "model_test_acc"] if f in ref.index else np.nan
         labels.append(f".{(a*1000):.0f}" if not np.isnan(a) else "?")
-    ax2.set_xticklabels(labels, fontsize=6.5, color="#90c070")
-    ax2.set_xlabel("Test accuracy ->", fontsize=8, color="#90c070", labelpad=4)
-    ax2.tick_params(axis="x", colors="#90c070")
+    ax2.set_xticklabels(labels, fontsize=16, color="#000000")
+    ax2.set_xlabel("Test accuracy ->", fontsize=20, color="#000000", labelpad=4)
+    ax2.tick_params(axis="x", colors="#000000")
     for spine in ax2.spines.values():
         spine.set_visible(False)
     return ax2
@@ -261,19 +261,19 @@ def plot_metric(
         for xi, val in zip(x, y_vals):
             if not np.isnan(val):
                 ax.annotate(
-                    f"{val:.4f}",
+                    f"{val:.3f}",
                     xy=(xi, val),
                     xytext=(0, 8),
                     textcoords="offset points",
                     ha="center", va="bottom",
-                    fontsize=7, color="#c8cfe8",
+                    fontsize=20, color="#333333",
                 )
 
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=7, ha="center")
-        ax.set_ylabel(y_label, fontsize=10)
-        ax.set_title(title, fontsize=13, pad=12, fontweight="bold")
-        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
+        ax.set_xticklabels(x_labels, fontsize=18, ha="center")
+        ax.set_ylabel(y_label, fontsize=40)
+        ax.set_title(title, fontsize=40, pad=12, fontweight="bold")
+        # ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
         ax.grid(axis="y", zorder=0)
         ax.set_xlim(-0.6, len(sorted_folders) - 0.4)
 
@@ -415,19 +415,19 @@ def plot_multi_metric_line(
                         xy=(xi, val),
                         xytext=(0, 7),
                         textcoords="offset points",
-                        ha="center", fontsize=6.5, color=color,
+                        ha="center", fontsize=16, color=color,
                     )
 
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=7, ha="center")
-        ax.set_ylabel("Metric value", fontsize=10)
-        ax.set_title(config["title"], fontsize=12, pad=12, fontweight="bold")
+        ax.set_xticklabels(x_labels, fontsize=12, ha="center")
+        ax.set_ylabel("Metric value", fontsize=25)
+        ax.set_title(config["title"], fontsize=30, pad=12, fontweight="bold")
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
         ax.grid(axis="both", zorder=0)
         ax.set_xlim(-0.6, len(sorted_folders) - 0.4)
-        ax.legend(loc="upper left", fontsize=9,
-                  facecolor="#1a1d27", edgecolor="#3a3d4d",
-                  labelcolor="#e0e0e0")
+        ax.legend(loc="upper left", fontsize=24,
+                facecolor="#ffffff", edgecolor="#cccccc",
+                labelcolor="#111111")
 
         if sort_by == "params":
             _add_param_axis(ax, df, sorted_folders, x)
@@ -471,8 +471,8 @@ def plot_all_line_plots(df, sorted_folders_params, sorted_folders_acc,
 
 def main():
     parser = argparse.ArgumentParser(description="Plot AI model interpretability metrics.")
-    parser.add_argument("--root_dir",   default=".",     help="Directory containing model folders")
-    parser.add_argument("--output_dir", default="plots", help="Where to save output PNGs")
+    parser.add_argument("--root_dir",   default="fixed_fidelity_interpretability/",     help="Directory containing model folders")
+    parser.add_argument("--output_dir", default="plots/", help="Where to save output PNGs")
     args = parser.parse_args()
 
     print(f"Scanning '{args.root_dir}' for model folders ...")
