@@ -38,10 +38,10 @@ COLOR_NEGATIVE  = "#d83040"   # red    - regression annotation
 # Each entry: (display_title, method_filter, csv_column, y_label, higher_is_better)
 METRICS = [
     ("Test Accuracy",        None,      "model_test_acc", "Accuracy",      True),
-    ("SHAP - Insertion AUC", "shap",    "insertion_auc",  "Insertion AUC", True),
-    ("SHAP - Deletion AUC",  "shap",    "deletion_auc",   "Deletion AUC",  False),  # lower = better
-    ("GradCAM - Insertion AUC", "gradcam", "insertion_auc", "Insertion AUC", True),
-    ("GradCAM - Deletion AUC",  "gradcam", "deletion_auc",  "Deletion AUC",  False),
+    ("SHAP: iAUC", "shap",    "insertion_auc",  "Insertion AUC", True),
+    ("SHAP: -dAUC",  "shap",    "deletion_auc",   "Deletion AUC",  False),  # lower = better
+    ("GradCAM: iAUC", "gradcam", "insertion_auc", "Insertion AUC", True),
+    ("GradCAM: -dAUC",  "gradcam", "deletion_auc",  "Deletion AUC",  False),
 ]
 
 def load_csv(path: str) -> pd.DataFrame:
@@ -327,7 +327,7 @@ def plot_delta_waterfall(
         delta = v_ft - v_base
         if not higher_is_better:
             delta = -delta
-            label = f"↓ {title}"   # lower deletion AUC = better; we flip sign
+            label = f"{title}"
         else:
             label = title
         items.append((label, delta))
@@ -356,12 +356,13 @@ def plot_delta_waterfall(
             )
 
         ax.axvline(0, color="#9098b0", linewidth=1.2, zorder=4)
-        ax.set_xlabel("Δ (finetuned - base)  [positive = improvement]", fontsize=10)
+        ax.set_xlabel("Δ (finetuned - base)", fontsize=10)
         ax.set_title(
-            f"Improvement Delta - Finetuning\n{folder_name}",
-            fontsize=11, fontweight="bold", pad=10,
+            f"Finetuning result model B",
+            fontsize=12, fontweight="bold", pad=10,
         )
         ax.grid(axis="x", zorder=0)
+        ax.set_xlim([-0.021,0.055])
         ax.invert_yaxis()
 
         fig.tight_layout()
@@ -391,14 +392,14 @@ def main():
     output_dir = os.path.join(cwd, "finetune_plots")
     print(f"\nSaving plots to: {output_dir}")
 
-    print("\n── Bar comparisons (one per metric) ──")
-    plot_bar_comparison(base_df, ft_df, output_dir, folder_name)
+    #print("\n── Bar comparisons (one per metric) ──")
+    #plot_bar_comparison(base_df, ft_df, output_dir, folder_name)
 
-    print("\n── Summary overview ──")
-    plot_summary(base_df, ft_df, output_dir, folder_name)
+    #print("\n── Summary overview ──")
+    #plot_summary(base_df, ft_df, output_dir, folder_name)
 
-    print("\n── Radar chart ──")
-    plot_radar(base_df, ft_df, output_dir, folder_name)
+    #print("\n── Radar chart ──")
+    #plot_radar(base_df, ft_df, output_dir, folder_name)
 
     print("\n── Delta waterfall ──")
     plot_delta_waterfall(base_df, ft_df, output_dir, folder_name)

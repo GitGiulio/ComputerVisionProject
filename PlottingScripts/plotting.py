@@ -41,8 +41,8 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
             ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
-           # ("Stability",     "stability",      "#2ab85a"),
-            ("Test Accuracy", "model_test_acc", "#c49a00"),
+           # ("Stability",     "stability",      "#c49a00"),
+            ("Test Accuracy", "model_test_acc", "#2ab85a"),
         ],
     },
     {
@@ -52,8 +52,8 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
             ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
-        #    ("Stability",     "stability",      "#2ab85a"),
-            ("Test Accuracy", "model_test_acc", "#c49a00"),
+        #    ("Stability",     "stability",      "#c49a00"),
+            ("Test Accuracy", "model_test_acc", "#2ab85a"),
         ],
     },
     {
@@ -63,8 +63,8 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
             ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
-       #     ("Stability",     "stability",      "#2ab85a"),
-            ("Test Accuracy", "model_test_acc", "#c49a00"),
+       #     ("Stability",     "stability",      "#c49a00"),
+            ("Test Accuracy", "model_test_acc", "#2ab85a"),
         ],
     },
     {
@@ -74,8 +74,8 @@ LINE_PLOT_CONFIGS = [
         "metrics": [
             ("Insertion AUC", "insertion_auc",  "#3a6fd8"),
             ("Deletion AUC",  "deletion_auc",   "#d85a2a"),
-       #     ("Stability",     "stability",      "#2ab85a"),
-            ("Test Accuracy", "model_test_acc", "#c49a00"),
+       #     ("Stability",     "stability",      "#c49a00"),
+            ("Test Accuracy", "model_test_acc", "#2ab85a"),
         ],
     },
 ]
@@ -247,11 +247,13 @@ def make_x_labels(sorted_folders: list[str], params_map: dict) -> list[str]:
     return labels
 
 
-def sort_folders_by_params(df: pd.DataFrame) -> list[str]:
+def sort_folders_by_kernels(df: pd.DataFrame) -> list[str]:
+    #df = df[df["kernel_size"] != "0"]
+    #df = df[df["model_test_acc"] > 0.66]
     ref = (
-        df[["folder", "model_tot_param", "weight_decay"]]
+        df[["folder", "kernel_size", "model_test_acc"]]
         .drop_duplicates("folder")
-        .sort_values(["model_tot_param", "weight_decay"])
+        .sort_values(["kernel_size", "model_test_acc"])
     )
     return ref["folder"].tolist()
 
@@ -291,9 +293,9 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
     for f in sorted_folders:
         a = ref.loc[f, "model_test_acc"] if f in ref.index else np.nan
         labels.append(f".{int(a*1000)}" if not np.isnan(a) else "?")
-    ax2.set_xticklabels(labels, fontsize=6.5, color="#337722")
-    ax2.set_xlabel("Test accuracy →", fontsize=8, color="#337722", labelpad=4)
-    ax2.tick_params(axis="x", colors="#337722")
+    ax2.set_xticklabels(labels, fontsize=12, color="#000000")
+    ax2.set_xlabel("Test accuracy ->", fontsize=19, color="#000000", labelpad=4)
+    ax2.tick_params(axis="x", colors="#000000")
     for spine in ax2.spines.values():
         spine.set_visible(False)
     return ax2
@@ -301,7 +303,7 @@ def _add_accuracy_axis(ax, df, sorted_folders, x):
 
 def _draw_baseline_hline(ax, value: float, color: str,
                          label: str = "baseline",
-                         alpha: float = 0.45,
+                         alpha: float = 1.0,
                          desaturate_factor: float = 0.45):
     """Draw a horizontal dashed line for a baseline value."""
     ds_color = desaturate(color, desaturate_factor)
@@ -317,13 +319,13 @@ def _draw_baseline_hline(ax, value: float, color: str,
     # Small text annotation on the right edge
     xlim = ax.get_xlim()
     ax.text(
-        xlim[1],
+        xlim[1] - 1.5,
         value,
         f" {value:.3f}",
         color=ds_color,
-        fontsize=6.5,
+        fontsize=16,
         va="center",
-        alpha=alpha + 0.15,
+        alpha=alpha,
         clip_on=False,
     )
 
@@ -340,14 +342,22 @@ def plot_metric(
     baseline: dict,
     secondary_axis: str = "params",
 ):
-    sub = df[df["method"] == method] if method else df.drop_duplicates("folder")
+    sub_grad = df[df["method"] == "gradcam"] if method else df.drop_duplicates("folder")
+    sub_shap = df[df["method"] == "shap"] if method else df.drop_duplicates("folder")
 
-    y_vals = []
+    y_vals_grad = []
+    y_vals_shap = []
     for f in sorted_folders:
-        row = sub[sub["folder"] == f]
-        y_vals.append(
-            row[column].values[0]
-            if not row.empty and not pd.isna(row[column].values[0])
+        row_grad = sub_grad[sub_grad["folder"] == f]
+        row_shap = sub_shap[sub_shap["folder"] == f]
+        y_vals_grad.append(
+            row_grad[column].values[0]
+            if not row_grad.empty and not pd.isna(row_grad[column].values[0])
+            else np.nan
+        )
+        y_vals_shap.append(
+            row_shap[column].values[0]
+            if not row_shap.empty and not pd.isna(row_shap[column].values[0])
             else np.nan
         )
 
@@ -356,10 +366,12 @@ def plot_metric(
     with plt.rc_context(STYLE):
         fig, ax = plt.subplots(figsize=(max(10, len(sorted_folders) * 1.0), 8))
 
-        ax.plot(x, y_vals, color=ACCENT_COLOR, linewidth=2,
-                marker="o", markersize=6, zorder=3, label=y_label)
-
-        for xi, val in zip(x, y_vals):
+        ax.plot(x, y_vals_grad, color=ACCENT2_COLOR, linewidth=2,
+                marker="o", markersize=6, zorder=3, label="shap - stability")
+        ax.plot(x, y_vals_shap, color=ACCENT_COLOR, linewidth=2,
+                marker="o", markersize=6, zorder=3, label="gradcam - stability")
+        
+        for xi, val in zip(x, y_vals_grad):
             if not np.isnan(val):
                 ax.annotate(
                     f"{val:.4f}",
@@ -367,21 +379,36 @@ def plot_metric(
                     xytext=(0, 8),
                     textcoords="offset points",
                     ha="center", va="bottom",
-                    fontsize=7, color="#333355",
+                    fontsize=13, color="#983b16",
+                )
+        for xi, val in zip(x, y_vals_shap):
+            if not np.isnan(val):
+                ax.annotate(
+                    f"{val:.4f}",
+                    xy=(xi, val),
+                    xytext=(0, 8),
+                    textcoords="offset points",
+                    ha="center", va="bottom",
+                    fontsize=13, color="#333355",
                 )
 
         # Baseline line
-        bval = get_baseline_value(baseline, method, column)
-        if bval is not None:
-            _draw_baseline_hline(ax, bval, ACCENT_COLOR, label="baseline")
-            ax.legend(loc="upper left", fontsize=8,
+        bval_shap = get_baseline_value(baseline, "shap", column)
+        if bval_shap is not None:
+            _draw_baseline_hline(ax, bval_shap, ACCENT_COLOR, label="shap - baseline")
+            ax.legend(loc="upper left", fontsize=27,
+                      facecolor="#ffffff", edgecolor="#c0c4d0")
+        bval_grad = get_baseline_value(baseline, "gradcam", column)
+        if bval_grad is not None:
+            _draw_baseline_hline(ax, bval_grad, ACCENT2_COLOR, label="gradcam - baseline")
+            ax.legend(loc="upper left", fontsize=27,
                       facecolor="#ffffff", edgecolor="#c0c4d0")
 
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, fontsize=7, ha="center")
-        ax.set_ylabel(y_label, fontsize=10)
-        ax.set_title(title, fontsize=13, pad=12, fontweight="bold")
-        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
+        ax.set_ylabel("Stability", fontsize=16)
+        ax.set_title("Stability comparison", fontsize=30, pad=12, fontweight="bold")
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
         ax.grid(axis="y", zorder=0)
         ax.set_xlim(-0.6, len(sorted_folders) - 0.4)
 
@@ -398,12 +425,14 @@ def plot_metric(
 
 
 def plot_all(df, sorted_folders_params, sorted_folders_acc,
-             x_labels_params, x_labels_acc, output_dir, baseline):
+             x_labels_kernels, x_labels_acc, output_dir, baseline):
     os.makedirs(output_dir, exist_ok=True)
     for title, method, column, y_label in METRICS:
+        if column != "stability":
+            continue
         safe = title.lower().replace(" ", "_").replace("-", "").replace("__", "_")
 
-        plot_metric(df, sorted_folders_params, x_labels_params,
+        plot_metric(df, sorted_folders_params, x_labels_kernels,
                     title + "  [sorted by parameter count]",
                     method, column, y_label,
                     os.path.join(output_dir, f"{safe}_by_params.png"),
@@ -534,7 +563,7 @@ def plot_multi_metric_line(
                         xy=(xi, val),
                         xytext=(0, 7),
                         textcoords="offset points",
-                        ha="center", fontsize=6.5, color=color,
+                        ha="center", fontsize=13, color=color,
                     )
 
             # Baseline horizontal line (same colour, desaturated)
@@ -545,13 +574,13 @@ def plot_multi_metric_line(
                 )
 
         ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, fontsize=7, ha="center")
-        ax.set_ylabel("Metric value", fontsize=10)
-        ax.set_title(config["title"], fontsize=12, pad=12, fontweight="bold")
-        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
+        ax.set_xticklabels(x_labels, fontsize=9, ha="center")
+        ax.set_ylabel("Metric value", fontsize=20)
+        ax.set_title("SHAP fidelity x model accuracy", fontsize=30, pad=12, fontweight="bold")
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
         ax.grid(axis="both", zorder=0)
         ax.set_xlim(-0.6, len(sorted_folders) - 0.4)
-        ax.legend(loc="center right", fontsize=8,
+        ax.legend(loc="lower right", fontsize=27,
                   facecolor="#ffffff", edgecolor="#c0c4d0",
                   labelcolor="#222233")
 
@@ -559,6 +588,32 @@ def plot_multi_metric_line(
             _add_param_axis(ax, df, sorted_folders, x)
         else:
             _add_accuracy_axis(ax, df, sorted_folders, x)
+
+        ax2 = ax.twiny()
+        ax2.set_xlim(ax.get_xlim())
+        ax2.set_xticks(x)
+        ref = df.drop_duplicates("folder").set_index("folder")
+        labels = []
+        for i,f in enumerate(sorted_folders):
+            if i == len(sorted_folders) - 7:
+                labels.append("11")
+            elif i == len(sorted_folders) - 2:
+                labels.append("15")
+            elif i == len(sorted_folders) - 1:
+                labels.append("19")
+            else:
+                labels.append("")
+
+        ax2.set_xticklabels(labels, fontsize=12, color="#000000")
+        #ax2.set_xlabel("Best for kernel size:", fontsize=19, color="#000000", labelpad=4)
+        ax2.tick_params(axis="x", colors="#000000")
+        for spine in ax2.spines.values():
+            spine.set_visible(False)
+
+        highlight_positions = [i for i, lbl in enumerate(labels) if lbl != ""]
+
+        for xi in highlight_positions:
+            ax.axvline(x=xi, color="#E54AC3", linestyle="-", linewidth=17.0, zorder=2, alpha=0.2)
 
         fig.tight_layout()
         fig.savefig(output_path, dpi=150, bbox_inches="tight",
@@ -568,10 +623,10 @@ def plot_multi_metric_line(
 
 
 def plot_all_line_plots(df, sorted_folders_params, sorted_folders_acc,
-                        x_labels_params, x_labels_acc, output_dir, baseline):
+                        x_labels_kernels, x_labels_acc, output_dir, baseline):
     os.makedirs(output_dir, exist_ok=True)
     folder_map = {"params": sorted_folders_params, "accuracy": sorted_folders_acc}
-    label_map  = {"params": x_labels_params,       "accuracy": x_labels_acc}
+    label_map  = {"params": x_labels_kernels,       "accuracy": x_labels_acc}
 
     for cfg in LINE_PLOT_CONFIGS:
         safe = (
@@ -610,22 +665,20 @@ def main():
 
     params_map = {f: parse_folder_name(f) for f in df["folder"].unique()}
 
-    sorted_by_params   = sort_folders_by_params(df)
+    sorted_by_kernels   = sort_folders_by_kernels(df)
     sorted_by_accuracy = sort_folders_by_accuracy(df)
-    x_labels_params    = make_x_labels(sorted_by_params,   params_map)
+    x_labels_kernels    = make_x_labels(sorted_by_kernels,   params_map)
     x_labels_acc       = make_x_labels(sorted_by_accuracy, params_map)
 
-    print("\nGenerating single-metric line plots (both orderings) ...")
-    plot_all(df, sorted_by_params, sorted_by_accuracy,
-             x_labels_params, x_labels_acc, args.output_dir, baseline)
+    #print("\nGenerating single-metric line plots (both orderings) ...")
+    #plot_all(df, sorted_by_kernels, sorted_by_accuracy,x_labels_kernels, x_labels_acc, args.output_dir, baseline)
 
-    print("\nGenerating summary grids ...")
-    plot_summary_grid(df, sorted_by_params,   x_labels_params, args.output_dir, baseline, suffix="by_params")
-    plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, baseline, suffix="by_accuracy")
+    #print("\nGenerating summary grids ...")
+    #plot_summary_grid(df, sorted_by_kernels,   x_labels_kernels, args.output_dir, baseline, suffix="by_params")
+    #plot_summary_grid(df, sorted_by_accuracy, x_labels_acc,    args.output_dir, baseline, suffix="by_accuracy")
 
     print("\nGenerating multi-metric line plots ...")
-    plot_all_line_plots(df, sorted_by_params, sorted_by_accuracy,
-                        x_labels_params, x_labels_acc, args.output_dir, baseline)
+    plot_all_line_plots(df, sorted_by_kernels, sorted_by_accuracy,x_labels_kernels, x_labels_acc, args.output_dir, baseline)
 
     print(f"\nDone! All plots saved to '{args.output_dir}/'")
 

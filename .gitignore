@@ -8,3 +8,9 @@
 /OldStuff/GPU_monitor/.bot_token
 /OldStuff/GPU_monitor/chat_ids.txt
 /OldStuff/GPU_monitor/user_state.json
+/gradcam_dogs_only_results
+/model_A
+/model_B
+/gradcam_dogs_plots
+/FINAL_RESULTS_FRFR
+model_kernel=\[3,3,3\]_64_3_512_1_wd0.0001_do0.0.pth
