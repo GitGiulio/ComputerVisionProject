@@ -69,8 +69,10 @@ from shared_code import (
 # Settings
 # =============================================================================
 
-DATA_DIR = "./Cat_dog_splitted"
+# DATA_DIR = "./Cat_dog_splitted"
+DATA_DIR = "./Cat_dog_splitted_Mathijs_original"
 TEST_DIR = os.path.join(DATA_DIR, "test")
+# MODELS_DIR = "models_giulio"
 MODELS_DIR = "models"
 OUTPUT_DIR = "./baseline_bias_check"
 
@@ -209,6 +211,7 @@ def build_model(spec: ModelSpec) -> torch.nn.Module:
         raise ValueError(f"Unknown architecture: {spec.architecture}")
 
     state_dict = torch.load(spec.path, map_location=DEVICE)
+
     model.load_state_dict(state_dict)
     return model.to(DEVICE).eval()
 
@@ -555,7 +558,16 @@ def run_for_model(spec: ModelSpec, dataset: Dataset, base_selected: dict[int, li
     class_0_name = dataset.classes[0]
     class_1_name = dataset.classes[1]
 
-    model = build_model(spec)
+    try:
+        model = build_model(spec)
+        print(f"[OK] Loaded model: {spec.fname}")
+
+    except Exception as e:
+        print(f"[CORRUPT/SKIPPED] Could not load model: {spec.fname}")
+        print(f"  Path: {spec.path}")
+        print(f"  Reason: {type(e).__name__}: {e}")
+        return
+    
     selected_by_class = maybe_filter_correct_indices(dataset, model, base_selected)
     classes = sorted(selected_by_class.keys())
 
